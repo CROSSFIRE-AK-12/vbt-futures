@@ -283,10 +283,17 @@ class FuturesPortfolio:
         sizing_mode: str = "fixed",
         sizing_kwargs: dict | None = None,
     ):
-        """Plot size-on-entry vs equity curve (two stacked panels).
+        """Two-panel plot showing equity AND size BOTH over TIME.
 
-        Useful for verifying that ``sizing_mode`` actually responds to
-        changes in total account equity.
+        Both panels share the same X axis (time), so you can directly see
+        how size scales with equity across the backtest timeline.
+
+        - Top panel: equity curve with orange triangle markers at every
+          entry bar.
+        - Bottom panel: size (lots) at every entry bar, with the
+          previous size carried forward as a horizontal step.  When
+          ``sizing_mode="equity_proportional"`` and equity is dropping,
+          you'll see the size step *downward* over time.
         """
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -299,35 +306,42 @@ class FuturesPortfolio:
         else:
             size_arr = resolve_size(
                 sizing_mode, base_size,
-                self._entry_mask_long,
-                self._entry_mask_long_exit if hasattr(self, "_entry_mask_long_exit") else None,
-                self._entry_mask_short,
-                self._entry_mask_short_exit if hasattr(self, "_entry_mask_short_exit") else None,
+                self._entry_mask_long, self._entry_mask_long_exit,
+                self._entry_mask_short, self._entry_mask_short_exit,
                 self.close.values.astype(np.float64),
                 float(self.init_cash), sizing_kwargs,
             )
 
-        # Find entry bars.
+        # Find entry bars (any column transition 0 -> non-zero).
         pos = self._position
         any_pos = (pos != 0).any(axis=1)
         prev_any = np.concatenate(([False], any_pos[:-1]))
         entry_bars = np.where(any_pos & ~prev_any)[0]
 
-        # Equity & size on entry.
+        # Per-bar size (mean across columns, since all cols are equal in v1).
+        size_per_bar = size_arr.mean(axis=1)
+
+        # Build a step series that holds the last entry's size until next entry.
+        size_step = np.zeros(T, dtype=np.float64)
+        if len(entry_bars) > 0:
+            current = size_per_bar[entry_bars[0]]
+            for t in range(T):
+                if t in entry_bars:
+                    current = size_per_bar[t]
+                size_step[t] = current
+
         eq_arr = self.equity.values
-        size_on_entry = np.array([
-            size_arr[t, :].mean() if np.any(size_arr[t, :] > 0) else np.nan
-            for t in entry_bars
-        ])
-        eq_on_entry = eq_arr[entry_bars]
 
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.6, 0.4], vertical_spacing=0.08,
-            subplot_titles=("Equity curve (with entry markers)",
-                            "Size on entry bars"),
+            row_heights=[0.5, 0.5], vertical_spacing=0.10,
+            subplot_titles=(
+                "Equity curve over time (orange = entry bar)",
+                "Size on entry bars over time (step line)",
+            ),
         )
-        # Top: equity curve.
+
+        # ---- Top: equity curve ----
         fig.add_trace(
             go.Scatter(
                 x=self.equity.index, y=eq_arr,
@@ -336,40 +350,51 @@ class FuturesPortfolio:
             ),
             row=1, col=1,
         )
-        # Mark entry bars on the equity curve.
+        if len(entry_bars) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=self.equity.index[entry_bars], y=eq_arr[entry_bars],
+                    mode="markers", name="entry bar",
+                    marker=dict(symbol="triangle-up", size=10, color="orange"),
+                ),
+                row=1, col=1,
+            )
+
+        # ---- Bottom: size step line ----
         fig.add_trace(
             go.Scatter(
-                x=self.equity.index[entry_bars], y=eq_on_entry,
-                mode="markers", name="entry",
-                marker=dict(symbol="triangle-up", size=10, color="orange"),
-            ),
-            row=1, col=1,
-        )
-        # Bottom: size on entry vs equity.
-        fig.add_trace(
-            go.Scatter(
-                x=eq_on_entry, y=size_on_entry,
-                mode="markers+lines",
-                name="size (vs equity)",
-                marker=dict(size=10, color="darkgreen"),
-                line=dict(color="darkgreen", width=1),
+                x=self.equity.index, y=size_step,
+                mode="lines", name="size (held until next entry)",
+                line=dict(color="darkgreen", width=2, shape="hv"),
             ),
             row=2, col=1,
         )
-        # Reference line: size = base_size.
+        if len(entry_bars) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=self.equity.index[entry_bars],
+                    y=size_per_bar[entry_bars],
+                    mode="markers", name="size at entry",
+                    marker=dict(size=10, color="darkgreen", symbol="circle"),
+                ),
+                row=2, col=1,
+            )
+        # Reference line: base size.
         fig.add_hline(
-            y=float(np.mean(size_arr[0, :])), line_dash="dash",
-            line_color="gray", opacity=0.5,
+            y=float(np.mean(size_arr[0, :])) if T > 0 else 0.0,
+            line_dash="dash", line_color="gray", opacity=0.5,
+            annotation_text="base_size",
+            annotation_position="right",
             row=2, col=1,
         )
-        fig.update_xaxes(title_text="equity at entry (cash + locked margin)",
-                         row=2, col=1)
+
         fig.update_yaxes(title_text="equity", row=1, col=1)
         fig.update_yaxes(title_text="size (lots)", row=2, col=1)
         fig.update_layout(
-            height=750,
-            title_text=f"vbt-futures: sizing behaviour ({sizing_mode})",
+            height=800,
+            title_text=f"vbt-futures: sizing mode = {sizing_mode}  (size step follows equity)",
             showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         return fig
 
