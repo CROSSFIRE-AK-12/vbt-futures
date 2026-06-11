@@ -31,6 +31,66 @@ _FLAT_SKIP = FLAT_CONFLICT_CODE["skip"]
 
 
 @njit(cache=True)
+def _do_close(
+    col: int,
+    price: float,
+    bar_idx: int,
+    cash: float,
+    position: np.ndarray,
+    avg_price: np.ndarray,
+    margin_locked: np.ndarray,
+    mult: np.ndarray,
+    fees: np.ndarray,
+    fixed_fees: np.ndarray,
+    slippage: np.ndarray,
+    orders: np.ndarray,
+    order_idx: int,
+    side_override: int = -1,
+) -> tuple[float, int]:
+    """Close any open position on column col.  Returns (new_cash, new_order_idx).
+
+    If ``side_override`` is given (e.g. ``LIQUIDATED``), that side code is
+    written to the record; otherwise it is inferred from the sign of the
+    current position.
+    """
+    pos = position[col]
+    s = 1.0 if pos > 0.0 else -1.0
+    adj_price = price * (1.0 - s * slippage[col])
+    size_abs = abs(pos)
+    notional = size_abs * adj_price * mult[col]
+    fee_paid = notional * fees[col] + size_abs * fixed_fees[col]
+    realized = pos * (adj_price - avg_price[col]) * mult[col]
+    released_margin = margin_locked[col]
+
+    new_cash = cash + released_margin + realized - fee_paid
+
+    if side_override == LIQUIDATED:
+        side_out = LIQUIDATED
+    elif pos > 0.0:
+        side_out = CLOSE_LONG
+    else:
+        side_out = CLOSE_SHORT
+
+    rec = orders[order_idx]
+    rec["id"] = order_idx
+    rec["col"] = col
+    rec["idx"] = bar_idx
+    rec["size"] = -pos
+    rec["price"] = adj_price
+    rec["fees"] = fee_paid
+    rec["margin"] = -released_margin
+    rec["side"] = side_out
+    rec["pnl"] = realized - fee_paid
+
+    cash = new_cash
+    position[col] = 0.0
+    avg_price[col] = 0.0
+    margin_locked[col] = 0.0
+    order_idx += 1
+    return cash, order_idx
+
+
+@njit(cache=True)
 def _try_open(
     col: int,
     signed_size: float,
@@ -151,12 +211,23 @@ def simulate_futures_nb(
             # mark-to-market / dynamic margin paths first.
             pass1_did_something = False
             if position[col] > 0.0:
-                # Long held: only short_entry can do something here.
-                # Reversal logic lands in Task 14; without it we simply hold.
-                pass1_did_something = False
+                # Long held: short_entry (reversal, Task 14) or long_exit (Task 12).
+                if long_exits[t, col]:
+                    cash, order_idx = _do_close(
+                        col, close[t, col], t, cash, position, avg_price,
+                        margin_locked, mult, fees, fixed_fees, slippage,
+                        orders, order_idx,
+                    )
+                    pass1_did_something = True
             elif position[col] < 0.0:
-                # Short held: only long_entry matters.  Task 14.
-                pass1_did_something = False
+                # Short held: long_entry (reversal, Task 14) or short_exit (Task 13).
+                if short_exits[t, col]:
+                    cash, order_idx = _do_close(
+                        col, close[t, col], t, cash, position, avg_price,
+                        margin_locked, mult, fees, fixed_fees, slippage,
+                        orders, order_idx,
+                    )
+                    pass1_did_something = True
             # If Pass 1 did something, skip Pass 2 (reversal case).
             if pass1_did_something:
                 continue

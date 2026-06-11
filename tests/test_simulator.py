@@ -144,3 +144,42 @@ def test_mark_to_market_decreases_cash_when_price_falls() -> None:
     assert mrg[1, 0] == 95.0
     # Equity = 9855 + 95 = 9950, which is the original 10000 minus 50 pnl.
     assert cash[1] + mrg[1, 0] == 9_950.0
+
+
+def test_close_long_releases_margin_and_books_pnl() -> None:
+    """Open long at 100, close at 105 -> 1*5*10 = 50 pnl."""
+    T, N = 2, 1
+    close = np.array([[100.0], [105.0]])
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, 0] = True
+    long_exits = np.zeros((T, N), dtype=bool)
+    long_exits[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=long_exits,
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # t=0: open long, cash=9900, mrg=100
+    assert cash[0] == 9_900.0
+    assert pos[0, 0] == 1.0
+    assert mrg[0, 0] == 100.0
+    # t=1:
+    #   STEP 1 mtm: 1*(105-100)*10 = +50  -> cash=9950
+    #   STEP 2 long_exit -> do_close: release margin 100 + realized pnl 50 = +150 -> cash=10100
+    #   STEP 3: position=0, mrg=0, no change
+    # Net: started 10000, ended 10100, profit = 100 = mult*1*(105-100) = 10*5*1
+    assert cash[1] == 10_100.0
+    assert pos[1, 0] == 0.0
+    assert mrg[1, 0] == 0.0
+    assert len(orders) == 2
+    assert orders[0]["side"] == 0     # OPEN_LONG
+    assert orders[1]["side"] == 1     # CLOSE_LONG
+    assert orders[1]["size"] == -1.0
+    assert orders[1]["price"] == 105.0
+    assert orders[1]["pnl"] == 50.0
+    assert orders[1]["margin"] == -100.0
