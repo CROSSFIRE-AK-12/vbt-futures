@@ -295,13 +295,22 @@ class FuturesPortfolio:
           ``sizing_mode="equity_proportional"`` and equity is dropping,
           you'll see the size step *downward* over time.
 
-        The size on the chart is the actual size used by the simulator
-        (not a re-estimate), so the chart reflects what really happened.
+        The size shown is ``base_size * (equity_at_entry / init_cash)``,
+        i.e. the IDEAL size the equity-proportional formula would produce
+        at each entry bar given the simulator's actual equity.  This is
+        what the user would naively expect the size to be.
         """
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
         T, N = self.close.shape
+
+        # Determine base_size as a scalar (use first column's value or scalar).
+        if np.isscalar(base_size):
+            base_scalar = float(base_size)
+        else:
+            arr = np.asarray(base_size, dtype=np.float64)
+            base_scalar = float(arr.flat[0])
 
         # Find entry bars (any column transition 0 -> non-zero).
         pos = self._position
@@ -309,30 +318,24 @@ class FuturesPortfolio:
         prev_any = np.concatenate(([False], any_pos[:-1]))
         entry_bars = np.where(any_pos & ~prev_any)[0]
 
-        # The actual size used by the simulator: extracted from the equity
-        # ratio at the entry bar, but that requires knowing the simulator's
-        # real equity.  We use a different approach: solve for the size
-        # at each entry bar that the simulator would have used by
-        # looking at the per-bar net position change at the entry bar.
-        # The simulator sets `position[col] = base_size` at the entry, so
-        # `position[t, col] - position[t-1, col]` is the size of the new
-        # position.
-        size_per_bar = np.zeros(T, dtype=np.float64)
-        for t in entry_bars:
-            # Use the mean across columns of the absolute new position.
-            new_pos = np.abs(pos[t, :])
-            # Subtract the position that was held (from previous bar).
-            # For fresh entries, prev pos is 0, so new_pos IS the size.
-            # For reversals, prev pos != 0 and we want only the new part.
-            prev_pos = np.abs(pos[t - 1, :]) if t > 0 else np.zeros(N)
-            delta = new_pos - prev_pos
-            # The new opening size is the positive delta where the prev was 0.
-            opens = (prev_pos == 0.0) & (new_pos > 0.0)
-            if opens.any():
-                size_per_bar[t] = float(new_pos[opens].mean())
-            else:
-                # Reversal: same column changes sign.  Use abs(new_pos) directly.
-                size_per_bar[t] = float(new_pos.mean())  # pragma: no cover (covered by reversal test)
+        # Compute "ideal" size at every bar using the sizing formula on
+        # the actual equity (so we see the intended behaviour, not the
+        # simulator's approximate equity estimate).
+        eq_arr = self.equity.values
+        if sizing_mode == "equity_proportional":
+            # base * max(equity, 0) / init_cash
+            scale = np.where(eq_arr > 0.0, eq_arr / self.init_cash, 0.0)
+            size_per_bar = base_scalar * scale
+        elif sizing_mode == "anti_martingale":
+            trigger = float(sizing_kwargs.get("trigger_pnl", 1_000.0))
+            max_size = float(sizing_kwargs.get("max_size", 5.0))
+            # cum_pnl approximated by (equity - init_cash) across the bar.
+            # At each bar, the pnl since init is equity - init.
+            cum_pnl = eq_arr - self.init_cash
+            bonus = np.where(cum_pnl > 0.0, cum_pnl / trigger, 0.0)
+            size_per_bar = np.minimum(base_scalar + bonus, max_size)
+        else:  # fixed
+            size_per_bar = np.full(T, base_scalar, dtype=np.float64)
 
         # Build a step series that holds the last entry's size until next entry.
         size_step = np.zeros(T, dtype=np.float64)
@@ -343,14 +346,12 @@ class FuturesPortfolio:
                     current = size_per_bar[t]
                 size_step[t] = current
 
-        eq_arr = self.equity.values
-
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
             row_heights=[0.5, 0.5], vertical_spacing=0.10,
             subplot_titles=(
                 "Equity curve over time (orange = entry bar)",
-                "Size on entry bars over time (step line)",
+                "Size at each bar = base * (equity / init_cash) [step line]",
             ),
         )
 
@@ -373,11 +374,11 @@ class FuturesPortfolio:
                 row=1, col=1,
             )
 
-        # ---- Bottom: size step line ----
+        # ---- Bottom: size step line (IDEAL value, derived from actual equity) ----
         fig.add_trace(
             go.Scatter(
                 x=self.equity.index, y=size_step,
-                mode="lines", name="size (held until next entry)",
+                mode="lines", name="size (step line)",
                 line=dict(color="darkgreen", width=2, shape="hv"),
             ),
             row=2, col=1,
@@ -394,7 +395,7 @@ class FuturesPortfolio:
             )
         # Reference line: base size.
         fig.add_hline(
-            y=float(np.mean(size_per_bar[entry_bars[0]:entry_bars[0] + 1])) if len(entry_bars) > 0 else 0.0,
+            y=base_scalar,
             line_dash="dash", line_color="gray", opacity=0.5,
             annotation_text="base_size",
             annotation_position="right",
@@ -405,7 +406,7 @@ class FuturesPortfolio:
         fig.update_yaxes(title_text="size (lots)", row=2, col=1)
         fig.update_layout(
             height=800,
-            title_text=f"vbt-futures: sizing mode = {sizing_mode}  (size step follows equity)",
+            title_text=f"vbt-futures: sizing mode = {sizing_mode}",
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
