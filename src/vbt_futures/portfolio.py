@@ -133,3 +133,154 @@ class FuturesPortfolio:
                     )
                     open_rec = None
         return pd.DataFrame(rows)
+
+    # ---------- summary stats ----------
+    def stats(self) -> pd.Series:
+        """One-row summary of the run (22 fields per spec §6.5).
+
+        Sharpe / Sortino / Annualized return are computed from the
+        per-bar return series using ``bars_per_year`` as the
+        annualisation factor (no vbt dependency).
+        """
+        eq = self.equity
+        ret = self.returns.values
+        final_equity = float(eq.iloc[-1])
+        total_return = (final_equity / self.init_cash) - 1.0
+        bpy = float(self.bars_per_year)
+
+        # Annualised return: geometric for long horizons is fine to
+        # approximate as bpy * mean(ret) when returns are small, but
+        # compute properly for accuracy.
+        if len(ret) > 1 and (1.0 + ret[1:]).all() > 0.0:
+            period_return = float(np.prod(1.0 + ret[1:]) - 1.0)
+        else:
+            period_return = float(ret.sum())
+        if period_return > -1.0 and bpy > 0.0:
+            ann_ret = (1.0 + period_return) ** (bpy / max(len(ret) - 1, 1)) - 1.0
+        else:
+            ann_ret = float("nan")
+
+        # Sharpe: mean / std * sqrt(bpy)
+        r = ret[1:]  # skip the 0.0 first bar
+        std = float(np.std(r, ddof=0))
+        mean = float(np.mean(r))
+        sharpe = (mean / std) * np.sqrt(bpy) if std > 0.0 else float("nan")
+
+        # Sortino: mean / downside_std * sqrt(bpy)
+        downside = r[r < 0.0]
+        down_std = float(np.std(downside, ddof=0)) if len(downside) > 0 else 0.0
+        sortino = (mean / down_std) * np.sqrt(bpy) if down_std > 0.0 else float("nan")
+
+        t = self.trades
+        win_mask = t["pnl"] > 0
+        loss_mask = t["pnl"] < 0
+        total_profit = float(t.loc[win_mask, "pnl"].sum()) if win_mask.any() else 0.0
+        total_loss = float(t.loc[loss_mask, "pnl"].sum()) if loss_mask.any() else 0.0
+        profit_factor = (total_profit / -total_loss) if total_loss != 0.0 else float("nan")
+        avg_win = float(t.loc[win_mask, "pnl"].mean()) if win_mask.any() else float("nan")
+        avg_loss = float(t.loc[loss_mask, "pnl"].mean()) if loss_mask.any() else float("nan")
+        win_loss_ratio = (avg_win / -avg_loss) if (avg_loss != 0.0 and avg_loss == avg_loss) else float("nan")
+
+        return pd.Series(
+            {
+                "Start": eq.index[0],
+                "End": eq.index[-1],
+                "Period": len(eq),
+                "Init Cash": self.init_cash,
+                "Final Equity": final_equity,
+                "Total Return [%]": total_return * 100.0,
+                "Annualized Return [%]": ann_ret * 100.0,
+                "Sharpe Ratio": float(sharpe),
+                "Sortino Ratio": float(sortino),
+                "Max Drawdown [%]": float(self.drawdown.min() * 100.0),
+                "Total Trades": len(t),
+                "Win Rate [%]": (win_mask.sum() / len(t) * 100.0) if len(t) > 0 else float("nan"),
+                "Profit Factor": profit_factor,
+                "Avg Trade PnL": float(t["pnl"].mean()) if len(t) > 0 else float("nan"),
+                "Avg Win": avg_win,
+                "Avg Loss": avg_loss,
+                "Win/Loss Ratio": win_loss_ratio,
+                "Max Position": float(self.position.abs().values.max()),
+                "Total Fees": float(self.orders["fees"].sum()) if len(self.orders) > 0 else 0.0,
+                "Liquidations": int(t["is_liquidated"].sum()) if len(t) > 0 else 0,
+                "Bars Per Year": self.bars_per_year,
+                "Trading Days Per Year": self.trading_days_per_year,
+            },
+        )
+
+    # ---------- plotting ----------
+    def plot(self):
+        """Return a plotly Figure with two stacked panels:
+        top = close prices (one line per contract) + order markers;
+        bottom = equity curve + drawdown.
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.7, 0.3], vertical_spacing=0.05,
+        )
+        # Panel 1: close prices.
+        for col_name in self.close.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=self.close.index, y=self.close[col_name],
+                    mode="lines", name=f"{col_name} close",
+                ),
+                row=1, col=1,
+            )
+        # Order markers.
+        if len(self.orders) > 0:
+            for side_val, label, marker_sym, color in [
+                (0, "open long", "triangle-up", "green"),
+                (1, "close long", "triangle-down", "red"),
+                (2, "open short", "triangle-down", "orange"),
+                (3, "close short", "triangle-up", "blue"),
+                (4, "liquidated", "x", "black"),
+            ]:
+                mask = self.orders["side"] == side_val
+                if mask.any():
+                    sub = self.orders[mask]
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sub["timestamp"],
+                            y=[self.close.iloc[int(i), int(c)] for i, c in zip(sub["idx"], sub["col"])],
+                            mode="markers",
+                            name=label,
+                            marker=dict(symbol=marker_sym, size=10, color=color),
+                        ),
+                        row=1, col=1,
+                    )
+        # Panel 2: equity + drawdown.
+        fig.add_trace(
+            go.Scatter(x=self.equity.index, y=self.equity.values, mode="lines", name="equity"),
+            row=2, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=self.drawdown.index, y=self.drawdown.values * 100.0,
+                mode="lines", name="drawdown %", fill="tozeroy",
+                line=dict(color="red"),
+            ),
+            row=2, col=1,
+        )
+        fig.update_layout(height=700, title_text="vbt-futures backtest")
+        return fig
+
+    # ---------- vbt interop ----------
+    def to_vbt_orders(self) -> pd.DataFrame:
+        """Convert internal ``futures_order_dt`` to vbt-style order DataFrame.
+
+        vbt's order format uses ``side`` 0=Buy, 1=Sell.  We map
+        OPEN_LONG/CLOSE_SHORT -> 0, and OPEN_SHORT/CLOSE_LONG -> 1.
+        LIQUIDATED is mapped to Sell (1).
+        """
+        if len(self.orders) == 0:
+            return pd.DataFrame(columns=["id", "col", "idx", "size", "price", "fees", "side"])
+        df = self.orders[["id", "col", "idx", "size", "price", "fees", "side"]].copy()
+        vbt_side = df["side"].map(
+            {0: 0, 1: 1, 2: 1, 3: 0, 4: 1},
+        )
+        df["side"] = vbt_side
+        return df
