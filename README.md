@@ -58,18 +58,23 @@ pf.to_vbt_orders()   # convert to vbt-style order DataFrame (for interop)
 
 ## API Reference
 
-### `from_signals(close, *, long_entries, long_exits, short_entries, short_exits, specs, size, init_cash, freq, bars_per_year, trading_days_per_year) -> FuturesPortfolio`
+### `from_signals(close, *, long_entries, long_exits, short_entries, short_exits, specs, size, init_cash, freq, bars_per_year, trading_days_per_year, margin_mode, margin_lookback, margin_z_score, sizing_mode, sizing_kwargs) -> FuturesPortfolio`
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `close` | `pd.DataFrame (T, N)` | required | Closing prices; rows = bars, columns = contracts |
 | `long_entries` / `long_exits` / `short_entries` / `short_exits` | `pd.DataFrame (T, N)` bool | `None` | Entry/exit signal DataFrames. `None` ⇒ all False. |
 | `specs` | `list[FuturesSpec]` | required | Per-contract specs; `len(specs) == close.shape[1]` |
-| `size` | float / array / `DataFrame` | `1.0` | Number of lots per entry. Direction is given by the signal. Must be `> 0`. |
+| `size` | float / array / `DataFrame` | `1.0` | Base number of lots per entry. Direction is given by the signal. Must be `> 0`. |
 | `init_cash` | float | `100_000` | Initial account cash (excluding margin). |
 | `freq` | str / `pd.Timedelta` | `None` | pandas frequency string (informational). |
 | `bars_per_year` | float | `None` | Override annualisation factor. `None` ⇒ auto-infer from `close.index`. |
 | `trading_days_per_year` | int | `252` | Multiplier used when auto-inferring `bars_per_year`. Use 365 for crypto. |
+| `margin_mode` | `"gross"` / `"portfolio"` | `"gross"` | `"gross"`: each contract's margin is `|pos|·close·mult·margin_rate`. `"portfolio"`: applies a covariance-based diversification discount. |
+| `margin_lookback` | int | `60` | Number of bars to use for the rolling covariance matrix in `"portfolio"` mode. |
+| `margin_z_score` | float | `1.65` | One-sided normal quantile for portfolio VaR (1.65 ≈ 95%). |
+| `sizing_mode` | `"fixed"` / `"equity_proportional"` / `"anti_martingale"` | `"fixed"` | Position sizing rule (see [Sizing Modes](#sizing-modes) below). |
+| `sizing_kwargs` | `dict` | `None` | Extra params for the sizing mode (e.g. `trigger_pnl`, `max_size`). |
 
 ### `FuturesSpec` (`@dataclass(frozen=True)`)
 
@@ -83,6 +88,49 @@ pf.to_vbt_orders()   # convert to vbt-style order DataFrame (for interop)
 | `slippage` | float | `0.0` | Price penalty on fills (e.g. 0.01 = 1%) |
 | `tick_size` | float | `0.01` | Minimum price increment (informational only) |
 | `flat_conflict` | `"long"` / `"short"` / `"skip"` | `"skip"` | What to do when both long & short entry fire while flat |
+
+### Sizing Modes
+
+| Mode | Behaviour |
+|---|---|
+| `"fixed"` (default) | Every entry uses `size` directly. |
+| `"equity_proportional"` | `size` scales linearly with running equity: `size × equity_so_far / init_cash`. As the account grows, position size grows; as it shrinks, size shrinks. |
+| `"anti_martingale"` | Each unit of cum PnL above `trigger_pnl` adds one base lot to size, capped at `max_size`. Does NOT shrink size on losses (anti-martingale). |
+
+```python
+# Anti-martingale: every 1000 RMB of profit adds 1 lot, max 5 lots
+pf = vbtf.from_signals(
+    ..., sizing_mode="anti_martingale", size=1.0,
+    sizing_kwargs={"trigger_pnl": 1000.0, "max_size": 5.0},
+)
+```
+
+### Portfolio Margin
+
+`margin_mode="portfolio"` re-estimates the per-bar margin requirement using a
+rolling N×N covariance matrix.  The discount factor is:
+
+```
+portfolio_dollar_VaR  = sqrt(p^T Σ p)            where p = |position[col]| × close × mult
+sum_individual_VaR     = Σ |p_col| × std_col
+discount               = portfolio_dollar_VaR / sum_individual_VaR
+margin_locked[col]     = gross_margin[col] × discount
+```
+
+Properties:
+- **Perfect positive correlation** → discount ≈ 1.0 (no diversification benefit)
+- **Zero correlation** → discount < 1.0 (full diversification)
+- **Auto-adapts**: discount changes daily as the rolling covariance evolves
+
+```python
+pf = vbtf.from_signals(
+    ..., margin_mode="portfolio", margin_lookback=60,
+)
+```
+
+In the demo (`examples/demo_synthetic.py`), the 3-contract portfolio sees a
+~28% margin reduction vs gross because contracts 0/1 are highly correlated
+with each other but uncorrelated with contract 2.
 
 ### Signal Processing Rules (per bar, per column)
 
