@@ -172,8 +172,12 @@ class FuturesPortfolio:
         sortino = (mean / down_std) * np.sqrt(bpy) if down_std > 0.0 else float("nan")
 
         t = self.trades
-        win_mask = t["pnl"] > 0
-        loss_mask = t["pnl"] < 0
+        if len(t) == 0:
+            win_mask = pd.Series([], dtype=bool)
+            loss_mask = pd.Series([], dtype=bool)
+        else:
+            win_mask = t["pnl"] > 0
+            loss_mask = t["pnl"] < 0
         total_profit = float(t.loc[win_mask, "pnl"].sum()) if win_mask.any() else 0.0
         total_loss = float(t.loc[loss_mask, "pnl"].sum()) if loss_mask.any() else 0.0
         profit_factor = (total_profit / -total_loss) if total_loss != 0.0 else float("nan")

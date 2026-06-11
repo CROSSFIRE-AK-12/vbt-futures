@@ -106,6 +106,33 @@ def test_to_vbt_orders_empty_when_no_orders() -> None:
     assert list(df.columns) == ["id", "col", "idx", "size", "price", "fees", "side"]
 
 
+def test_stats_with_no_trades() -> None:
+    """stats() must not crash when no trades have been completed (e.g. hold-forever)."""
+    close = pd.DataFrame(
+        [[100.0], [100.0]],
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=2),
+    )
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10),),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.array([10_000.0, 10_000.0]),
+        _position=np.array([[0.0], [0.0]]),
+        _margin_locked=np.array([[0.0], [0.0]]),
+    )
+    s = p.stats()
+    # NaN for trade-derived stats, 0 for count.
+    assert s["Total Trades"] == 0
+    assert pd.isna(s["Win Rate [%]"])
+    assert pd.isna(s["Avg Win"])
+    assert pd.isna(s["Avg Loss"])
+    assert pd.isna(s["Avg Trade PnL"])
+    # Account-level stats are well-defined.
+    assert s["Final Equity"] == 10_000.0
+    assert s["Max Position"] == 0.0
+
+
 def test_from_signals_smoke() -> None:
     """End-to-end: 2 contracts, 5 daily bars, simple entry/exit pattern."""
     import vbt_futures as vbtf

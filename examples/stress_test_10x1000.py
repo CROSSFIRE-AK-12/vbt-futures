@@ -5,6 +5,10 @@ Goal:
 2. Auto-sizing check: do ``equity_proportional`` and ``anti_martingale``
    actually respond to changes in total account equity?
 
+The data is HAND-CRAFTED with 10 cycles of 50-day up + 50-day down trends
+(so equity swings by 1.65x per up-cycle and 1/1.65x per down-cycle).
+This gives a CLEAR visual signal of when size scales up and down.
+
 Run:
     python examples/stress_test_10x1000.py
 """
@@ -18,81 +22,145 @@ import pandas as pd
 import vbt_futures as vbtf
 
 
+# ---------------------------------------------------------------------------
+# Data generation: 10 contracts with strong, repeated trends.
+# ---------------------------------------------------------------------------
 def make_stress_data(
     n_days: int = 1000,
     n_contracts: int = 10,
     seed: int = 42,
 ) -> pd.DataFrame:
-    """10 contracts with mixed correlation structure:
+    """10 contracts with STRONG trends.
 
-    - Contracts 0,1,2 share a "metals" factor (high pairwise corr)
-    - Contracts 3,4,5 share a "energy" factor (high pairwise corr)
-    - Contracts 6,7 share a "grains" factor
-    - Contracts 8,9 are independent
+    Layout (1000 days, 10 cycles of 100 days):
+      - 50 days UP   at +1% daily drift
+      - 50 days DOWN at -1% daily drift
 
-    Each contract has its own vol (1%-2% daily).
+    Per-cycle equity swing: 1.65x (up) or 0.6x (down).
+    Cumulative effect: 1.65^10 ≈ 149x if you stay long, or volatile
+    wave if you hold through both directions.
     """
     rng = np.random.default_rng(seed)
     idx = pd.bdate_range("2024-01-02", periods=n_days)
-    n_factors = 4  # metals, energy, grains, independent-noise-pool
-    factors = rng.normal(0.0, 1.0, size=(n_days, n_factors))
-    # Contract -> factor loadings
-    loadings = np.array([
-        # metals  energy  grains  indep
-        [0.80,    0.00,   0.00,   0.20],   # 0
-        [0.85,    0.00,   0.00,   0.15],   # 1
-        [0.75,    0.05,   0.00,   0.20],   # 2
-        [0.00,    0.80,   0.00,   0.20],   # 3
-        [0.00,    0.85,   0.00,   0.15],   # 4
-        [0.05,    0.75,   0.00,   0.20],   # 5
-        [0.00,    0.00,   0.80,   0.20],   # 6
-        [0.00,    0.00,   0.85,   0.15],   # 7
-        [0.10,    0.10,   0.10,   0.70],   # 8
-        [0.15,    0.05,   0.05,   0.75],   # 9
-    ])
-    # Per-contract idiosyncratic sigma (1%-2%).
-    idio_sigma = rng.uniform(0.005, 0.015, size=n_contracts)
-    # Factor sigmas.
-    factor_sigma = np.array([0.015, 0.012, 0.018, 0.010])  # metals, energy, grains, indep
-
-    # log returns = factors (T, F) @ (loadings (N, F) * factor_sigma (F,))^T + idio
-    scaled_loadings = loadings * factor_sigma[None, :]  # (N, F)
-    log_ret = factors @ scaled_loadings.T  # (T, F) @ (F, N) = (T, N)
-    log_ret += rng.normal(0.0, idio_sigma[None, :], size=(n_days, n_contracts))
-    # Add a mild long-term drift so equity grows over time (-> tests auto-sizing).
-    drift = 0.0005  # ~0.05% per day
-    log_ret += drift
+    daily_drift = np.zeros(n_days)
+    for cycle_start in range(0, n_days, 100):
+        up_end = min(cycle_start + 50, n_days)
+        dn_end = min(cycle_start + 100, n_days)
+        daily_drift[cycle_start:up_end] =  0.01
+        daily_drift[up_end:dn_end]     = -0.01
 
     base_prices = np.array([100, 200, 50, 80, 120, 90, 60, 75, 110, 95], dtype=float)
+    n = len(base_prices)
+    idio = rng.normal(0.0, 0.003, size=(n_days, n))
+    log_ret = daily_drift[:, None] + idio
     prices = base_prices[None, :] * np.exp(np.cumsum(log_ret, axis=0))
-
-    cols = [f"C{i}" for i in range(n_contracts)]
-    return pd.DataFrame(prices, columns=cols, index=idx)
+    return pd.DataFrame(prices, columns=[f"C{i}" for i in range(n)], index=idx)
 
 
-def make_momentum_signals(
-    close: pd.DataFrame, fast: int = 10, slow: int = 50,
-) -> tuple:
-    """Long+short momentum: cross-over + position reversal logic."""
-    fast_ma = close.rolling(fast).mean()
-    slow_ma = close.rolling(slow).mean()
-    above = fast_ma > slow_ma
-    prev_above = above.shift(1).fillna(False)
-    long_entries = (above & ~prev_above).fillna(False).astype(bool)
-    long_exits = (~above & prev_above).fillna(False).astype(bool)
-    # Symmetric short signals.
-    short_entries = (~above & prev_above).fillna(False).astype(bool)
-    short_exits = (above & ~prev_above).fillna(False).astype(bool)
+# ---------------------------------------------------------------------------
+# Signal generators.
+# ---------------------------------------------------------------------------
+def make_uponly_signal(close: pd.DataFrame) -> tuple:
+    """Long at the start of each up-trend, exit at the end (no shorts).
+
+    Equity grows monotonically as we capture every up-phase.
+    """
+    T, N = close.shape
+    long_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    long_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    for cycle_start in range(0, T, 100):
+        up_start = cycle_start
+        up_end   = min(cycle_start + 50, T)
+        if up_start < T:
+            long_entries.iloc[up_start] = True
+        if up_end < T:
+            long_exits.iloc[up_end] = True
     return long_entries, long_exits, short_entries, short_exits
 
 
+def make_holdthrough_signal(close: pd.DataFrame) -> tuple:
+    """Buy at bar 0, hold through EVERYTHING until the end.
+
+    Equity swings up/down with the cycles - peak at every up-end,
+    dip at every down-end.
+    """
+    T, N = close.shape
+    long_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    long_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    long_entries.iloc[0] = True
+    return long_entries, long_exits, short_entries, short_exits
+
+
+def make_oscillating_signal(close: pd.DataFrame) -> tuple:
+    """Capture BOTH up- and down-phases (long then short alternating).
+
+    Equity oscillates but with mild overall gain (because the strategy
+    alternates directions each cycle, no compounding).
+
+    More importantly: many entries at different equity levels -> shows
+    scaling both up and down.
+    """
+    T, N = close.shape
+    long_entries  = pd.DataFrame(False, index=close.index, columns=close.columns)
+    long_exits    = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    for cycle_start in range(0, T, 100):
+        up_start = cycle_start
+        up_end   = min(cycle_start + 50, T)
+        dn_start = up_end
+        dn_end   = min(cycle_start + 100, T)
+        # Long the up-phase.
+        if up_start < T:
+            long_entries.iloc[up_start] = True
+        if up_end < T:
+            long_exits.iloc[up_end] = True
+        # Short the down-phase.
+        if dn_start < T:
+            short_entries.iloc[dn_start] = True
+        if dn_end < T:
+            short_exits.iloc[dn_end] = True
+    return long_entries, long_exits, short_entries, short_exits
+
+
+def make_losing_then_winning_signal(close: pd.DataFrame) -> tuple:
+    """Buy at the TOP of each up-trend (BAD entry timing) -> lose money.
+
+    After losing, equity drops -> size shrinks (smaller loss next time).
+    After each down-trend, the strategy exits with the loss and waits.
+    Demonstrates SIZE SCALING DOWN on losses.
+    """
+    T, N = close.shape
+    long_entries  = pd.DataFrame(False, index=close.index, columns=close.columns)
+    long_exits    = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_entries = pd.DataFrame(False, index=close.index, columns=close.columns)
+    short_exits   = pd.DataFrame(False, index=close.index, columns=close.columns)
+    # Buy at start of each down-trend (i.e., right after the peak).  We LOSE
+    # on every cycle since price keeps falling.  Equity decreases, size shrinks.
+    for cycle_start in range(0, T, 100):
+        up_end   = min(cycle_start + 50, T)
+        dn_start = up_end
+        if dn_start < T:
+            long_entries.iloc[dn_start] = True           # bad entry
+        dn_end   = min(cycle_start + 100, T)
+        if dn_end < T:
+            long_exits.iloc[dn_end] = True              # exit at the bottom
+    return long_entries, long_exits, short_entries, short_exits
+
+
+# ---------------------------------------------------------------------------
+# Specs and helpers.
+# ---------------------------------------------------------------------------
 def make_specs(n: int) -> list[vbtf.FuturesSpec]:
-    """Realistic specs: mult, margin_rate, fees for 10 contracts."""
-    # Vary margin rate slightly to make it interesting.
+    """Realistic specs for 10 contracts: vary mult and margin_rate."""
     return [
         vbtf.FuturesSpec(
             symbol=f"C{i}", mult=10.0 if i % 2 == 0 else 5.0,
-            margin_rate=0.10 + (i % 3) * 0.02,  # 10%, 12%, 14%
+            margin_rate=0.10 + (i % 3) * 0.02,
             fees=2e-4, fixed_fees=2.0,
         )
         for i in range(n)
@@ -100,7 +168,7 @@ def make_specs(n: int) -> list[vbtf.FuturesSpec]:
 
 
 def run_with_timing(label: str, **kwargs) -> vbtf.FuturesPortfolio:
-    """Run a backtest with timing and print summary."""
+    """Run a backtest with timing and print compact stats."""
     t0 = time.perf_counter()
     pf = vbtf.from_signals(**kwargs)
     elapsed = time.perf_counter() - t0
@@ -111,158 +179,181 @@ def run_with_timing(label: str, **kwargs) -> vbtf.FuturesPortfolio:
         "Annualized Return [%]", "Sharpe Ratio", "Max Drawdown [%]",
         "Total Trades", "Win Rate [%]", "Max Position", "Total Fees",
     ]]
-    with pd.option_context("display.width", 200):
+    with pd.option_context("display.width", 200, "display.max_rows", None):
         print(summary.to_string())
     print(f"  Wall time: {elapsed*1000:.1f} ms")
     return pf
 
 
+def show_size_timeline(pf, label: str) -> None:
+    """Show size-on-entry timeline demonstrating scaling."""
+    eq_arr = pf.equity.values
+    pos_arr = pf.position.values
+    any_pos = (pos_arr != 0).any(axis=1)
+    prev_any = np.concatenate(([False], any_pos[:-1]))
+    entry_bars = np.where(any_pos & ~prev_any)[0]
+    init_cash = pf.init_cash
+
+    if len(entry_bars) == 0:
+        # No entries -> can't show size scaling.  Skip the size timeline.
+        T = len(eq_arr)
+        print(f"\n  No entries in {label}; size doesn't scale (size = 1.0).")
+        print(f"  Equity still varies with the data (see Scenario A for big swings).")
+        return
+
+    print(f"\n  SIZE-ON-ENTRY TIMELINE  ({label}, equity_proportional)")
+    print(f"  {'bar':>5}  {'equity':>14}  {'change%':>8}  {'scale':>7}  {'lots':>6}")
+    prev_eq = init_cash
+    min_scale = np.inf
+    max_scale = -np.inf
+    for t in entry_bars:
+        size_eq = eq_arr[t] / init_cash
+        pct_change = (eq_arr[t] / prev_eq - 1.0) * 100
+        min_scale = min(min_scale, size_eq)
+        max_scale = max(max_scale, size_eq)
+        print(f"  t={t:>4}  {eq_arr[t]:>14,.0f}  {pct_change:>+7.2f}%  "
+              f"{size_eq:>6.3f}x  {size_eq:>5.2f}")
+        prev_eq = eq_arr[t]
+
+    swing_pct = (max_scale - min_scale) / min_scale * 100
+    print(f"\n  Size range across entries: {min_scale:.3f}x .. {max_scale:.3f}x  "
+          f"({swing_pct:.0f}% swing)")
+
+    # Equity curve at key cycle boundaries.
+    T = len(eq_arr)
+    print(f"\n  Equity curve at cycle boundaries:")
+    print(f"  {'bar':>5}  {'equity':>14}  {'cycle phase'}")
+    sample_bars = [0, 50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 950, 999]
+    for t in sample_bars:
+        if t < T:
+            phase = "↑ uptrend" if (t // 50) % 2 == 0 else "↓ downtrend"
+            print(f"  t={t:>4}  {eq_arr[t]:>14,.0f}  {phase}")
+
+
+# ---------------------------------------------------------------------------
+# Main.
+# ---------------------------------------------------------------------------
 def main() -> None:
     print("=" * 70)
     print("vbt-futures stress test: 10 contracts x 1000 days")
     print("=" * 70)
 
-    print("\n[1/3] Generating synthetic data ...")
+    print("\n[1/3] Generating synthetic data (10 cycles, +1%/-1% daily drift) ...")
     close = make_stress_data(n_days=1000, n_contracts=10)
     print(f"      close shape: {close.shape}")
     print(f"      base price range: {close.iloc[0].min():.1f} - {close.iloc[0].max():.1f}")
     print(f"      final price range: {close.iloc[-1].min():.1f} - {close.iloc[-1].max():.1f}")
-    print(f"      drift: +0.05% per day (compounded = +65% over 1000 days)")
-
-    print("\n[2/3] Generating momentum signals (10/50 SMA cross) ...")
-    long_entries, long_exits, short_entries, short_exits = make_momentum_signals(close)
-    n_long = long_entries.sum().sum()
-    n_short = short_entries.sum().sum()
-    print(f"      total long entries: {n_long}, short entries: {n_short}")
+    print(f"      expected: each up-cycle grows equity 1.65x; each down-cycle shrinks 0.6x")
 
     specs = make_specs(10)
-    common = dict(
-        close=close,
-        long_entries=long_entries, long_exits=long_exits,
-        short_entries=short_entries, short_exits=short_exits,
-        specs=specs,
-        init_cash=1_000_000.0,
-        freq="1D",
-    )
-
-    # Run 1: baseline (fixed sizing, gross margin)
-    pf_fixed = run_with_timing(
-        "Run 1: fixed sizing (1.0) + gross margin (baseline)",
-        **common, size=1.0,
-    )
-
-    # Run 2: equity_proportional (responds to BOTH wins and losses)
-    pf_eqprop = run_with_timing(
-        "Run 2: equity_proportional sizing + gross margin",
-        **common, sizing_mode="equity_proportional", size=1.0,
-    )
-
-    # Run 3: anti_martingale (only adds on profit, capped)
-    pf_antimart = run_with_timing(
-        "Run 3: anti_martingale sizing + gross margin (cap 5x)",
-        **common, sizing_mode="anti_martingale", size=1.0,
-        sizing_kwargs={"trigger_pnl": 5_000.0, "max_size": 5.0},
-    )
-
-    # Run 4: full Plan 3 - equity_proportional + portfolio margin
-    pf_eqprop_pm = run_with_timing(
-        "Run 4: equity_proportional + PORTFOLIO margin (recommended)",
-        **common, sizing_mode="equity_proportional", size=1.0,
-        margin_mode="portfolio", margin_lookback=60,
-    )
-
-    print("\n[3/3] Auto-sizing behaviour verification:")
-
-    # For the equity_proportional run, check that size on entry bars
-    # correlates with running equity.
-    def size_at_entry_bars(pf) -> np.ndarray:
-        """Extract size on bars where an entry signal fired (using from_signals' logic)."""
-        # Manually replay sizing for the proportional case: at each entry bar,
-        # size = 1.0 × (equity_so_far / init_cash).
-        eq = pf.equity.values
-        # Entry = any long_entry or short_entry True.
-        le = pf.close.index  # placeholder; just use equity
-        # Simpler: just use the position changes to find entries.
-        pos = pf.position.values
-        size_arr = np.ones(pos.shape, dtype=np.float64)  # not actually used
-        return pos
-
-    print("\nComparing final equity (higher = better):")
-    print(f"  fixed:               {pf_fixed.equity.iloc[-1]:>14,.2f}")
-    print(f"  equity_proportional: {pf_eqprop.equity.iloc[-1]:>14,.2f}")
-    print(f"  anti_martingale:     {pf_antimart.equity.iloc[-1]:>14,.2f}")
-    print(f"  eq_prop + portfolio: {pf_eqprop_pm.equity.iloc[-1]:>14,.2f}")
-
-    print("\nMax position (size growth indicator):")
-    print(f"  fixed:               {pf_fixed.stats()['Max Position']:>14.2f}")
-    print(f"  equity_proportional: {pf_eqprop.stats()['Max Position']:>14.2f}")
-    print(f"  anti_martingale:     {pf_antimart.stats()['Max Position']:>14.2f}")
-    print(f"  eq_prop + portfolio: {pf_eqprop_pm.stats()['Max Position']:>14.2f}")
-
-    # Check that equity_proportional size responds to equity (sample 5 entry bars).
-    print("\nSample of size-on-entry from equity_proportional run:")
-    eq_arr = pf_eqprop.equity.values
-    # Find entry bars: any time position changes from 0 to non-zero.
-    pos_arr = pf_eqprop.position.values
-    # Cross-contract aggregate position change.
-    any_pos = (pos_arr != 0).any(axis=1)
-    prev_any = np.concatenate(([False], any_pos[:-1]))
-    entry_bars = np.where(any_pos & ~prev_any)[0]
     init_cash = 1_000_000.0
-    print(f"  init_cash = {init_cash:,.0f}")
-    for t in entry_bars[:8]:
-        size_eq = eq_arr[t] / init_cash
-        print(f"  t={t:>4}  equity={eq_arr[t]:>14,.0f}  scale={size_eq:.3f}  (size=1.0 -> effective {size_eq:.2f} lots)")
 
-    # ----------------------------------------------------------------------
-    # Strong-trend scenario: confirm auto-sizing visibly scales size.
-    # ----------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # SCENARIO A: "up-only" strategy -> equity only grows.
+    # -----------------------------------------------------------------
     print("\n" + "=" * 70)
-    print("Bonus: Strong-trend scenario to show visible size scaling")
+    print("SCENARIO A: UP-only strategy (capture only the up-phases)")
     print("=" * 70)
-    strong_close = make_stress_data(n_days=1000, n_contracts=10, seed=42)
-    # Manually amplify the upward drift by adding a linear trend to each contract.
-    trend = np.linspace(0.0, 1.0, 1000)[:, None] * 50.0  # +50 over the period
-    strong_close = strong_close + trend
-    le2, lx2, se2, sx2 = make_momentum_signals(strong_close)
+    leA, lxA, seA, sxA = make_uponly_signal(close)
+    n_long = leA.sum().sum()
+    print(f"  {n_long} long entries (10 up-cycles), 0 short entries")
 
-    pf_trend_fixed = run_with_timing(
-        "Strong trend + fixed sizing",
-        close=strong_close, long_entries=le2, long_exits=lx2,
-        short_entries=se2, short_exits=sx2,
-        specs=specs, init_cash=1_000_000.0, freq="1D",
-        size=1.0,
+    common_A = dict(
+        close=close, long_entries=leA, long_exits=lxA,
+        short_entries=seA, short_exits=sxA,
+        specs=specs, init_cash=init_cash, freq="1D",
     )
-    pf_trend_eqprop = run_with_timing(
-        "Strong trend + equity_proportional sizing",
-        close=strong_close, long_entries=le2, long_exits=lx2,
-        short_entries=se2, short_exits=sx2,
-        specs=specs, init_cash=1_000_000.0, freq="1D",
-        sizing_mode="equity_proportional", size=1.0,
+    pf_A_fixed = run_with_timing("A1: fixed sizing (10.0 lots)", **common_A, size=10.0)
+    pf_A_eqprop = run_with_timing(
+        "A2: equity_proportional sizing (10 lots base)", **common_A,
+        sizing_mode="equity_proportional", size=10.0,
     )
+    show_size_timeline(pf_A_eqprop, "SCENARIO A (UP-only)")
 
-    # Sample size-on-entry from the eqprop run.
-    eq_arr = pf_trend_eqprop.equity.values
-    pos_arr = pf_trend_eqprop.position.values
-    any_pos = (pos_arr != 0).any(axis=1)
-    prev_any = np.concatenate(([False], any_pos[:-1]))
-    entry_bars = np.where(any_pos & ~prev_any)[0]
-    print("\nSize-on-entry samples (equity_proportional, strong trend):")
-    print(f"  init_cash = 1,000,000")
-    for t in entry_bars[:5]:
-        size_eq = eq_arr[t] / init_cash
-        print(f"  t={t:>4}  equity={eq_arr[t]:>14,.0f}  scale={size_eq:.3f}x  (effective lots = {1.0 * size_eq:.2f})")
-    for t in entry_bars[-3:]:
-        size_eq = eq_arr[t] / init_cash
-        print(f"  t={t:>4}  equity={eq_arr[t]:>14,.0f}  scale={size_eq:.3f}x  (effective lots = {1.0 * size_eq:.2f})")
+    # -----------------------------------------------------------------
+    # SCENARIO B: "hold-through" strategy -> equity swings up AND down.
+    # -----------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("SCENARIO B: HOLD-through strategy (1 entry, never exits)")
+    print("=" * 70)
+    print("  1 long entry at bar 0, no exits.  Equity follows the data waves.")
+    leB, lxB, seB, sxB = make_holdthrough_signal(close)
 
-    # Total margin (portfolio vs gross) comparison.
-    print("\nFinal bar total margin locked:")
-    print(f"  Run 1 (gross):                    {pf_fixed.margin_locked.iloc[-1].sum():>12,.2f}")
-    print(f"  Run 2 (gross):                    {pf_eqprop.margin_locked.iloc[-1].sum():>12,.2f}")
-    print(f"  Run 4 (portfolio):                {pf_eqprop_pm.margin_locked.iloc[-1].sum():>12,.2f}")
-    saving = 1 - pf_eqprop_pm.margin_locked.iloc[-1].sum() / pf_eqprop.margin_locked.iloc[-1].sum()
-    print(f"  portfolio margin saving:           {saving*100:.1f}%")
+    common_B = dict(
+        close=close, long_entries=leB, long_exits=lxB,
+        short_entries=seB, short_exits=sxB,
+        specs=specs, init_cash=init_cash, freq="1D",
+    )
+    pf_B_fixed = run_with_timing("B1: fixed sizing (10.0 lots)", **common_B, size=10.0)
+    pf_B_eqprop = run_with_timing(
+        "B2: equity_proportional sizing", **common_B,
+        sizing_mode="equity_proportional", size=10.0,
+    )
+    show_size_timeline(pf_B_eqprop, "SCENARIO B (HOLD-through)")
+
+    # -----------------------------------------------------------------
+    # SCENARIO C: "bad-timing" strategy -> lose money -> size shrinks.
+    # -----------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("SCENARIO C: BAD-timing strategy (size scales DOWN on losses)")
+    print("=" * 70)
+    leC, lxC, seC, sxC = make_losing_then_winning_signal(close)
+    print(f"  10 bad entries + 10 exits (buy at the top, exit at the bottom)")
+
+    common_C = dict(
+        close=close, long_entries=leC, long_exits=lxC,
+        short_entries=seC, short_exits=sxC,
+        specs=specs, init_cash=init_cash, freq="1D",
+    )
+    pf_C_fixed = run_with_timing("C1: fixed sizing (10.0 lots)", **common_C, size=10.0)
+    pf_C_eqprop = run_with_timing(
+        "C2: equity_proportional sizing (10 lots base)", **common_C,
+        sizing_mode="equity_proportional", size=10.0,
+    )
+    show_size_timeline(pf_C_eqprop, "SCENARIO C (BAD-timing)")
+
+    # -----------------------------------------------------------------
+    # SCENARIO D: alternating long/short -> many entries, mixed equity.
+    # -----------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("SCENARIO D: ALTERNATING long/short (oscillating equity, many entries)")
+    print("=" * 70)
+    leD, lxD, seD, sxD = make_oscillating_signal(close)
+    n_leD = leD.sum().sum()
+    n_seD = seD.sum().sum()
+    print(f"  {n_leD} long + {n_seD} short entries (20 total)")
+
+    common_D = dict(
+        close=close, long_entries=leD, long_exits=lxD,
+        short_entries=seD, short_exits=sxD,
+        specs=specs, init_cash=init_cash, freq="1D",
+    )
+    pf_D_eqprop = run_with_timing(
+        "D: equity_proportional sizing (10 lots base)", **common_D,
+        sizing_mode="equity_proportional", size=10.0,
+    )
+    show_size_timeline(pf_D_eqprop, "SCENARIO D (ALTERNATING)")
+
+    # -----------------------------------------------------------------
+    # Comparison summary.
+    # -----------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("HEAD-TO-HEAD COMPARISON (Scenario B - hold-through)")
+    print("=" * 70)
+    print(f"  {'metric':<25}  {'fixed':>16}  {'equity_prop':>16}")
+    s_fix = pf_B_fixed.stats()
+    s_eqp = pf_B_eqprop.stats()
+    rows = [
+        ("Final Equity",          f"{s_fix['Final Equity']:>16,.0f}",  f"{s_eqp['Final Equity']:>16,.0f}"),
+        ("Total Return [%]",      f"{s_fix['Total Return [%]']:>16.2f}", f"{s_eqp['Total Return [%]']:>16.2f}"),
+        ("Max Drawdown [%]",      f"{s_fix['Max Drawdown [%]']:>16.2f}", f"{s_eqp['Max Drawdown [%]']:>16.2f}"),
+        ("Sharpe Ratio",          f"{s_fix['Sharpe Ratio']:>16.3f}",      f"{s_eqp['Sharpe Ratio']:>16.3f}"),
+        ("Total Fees",            f"{s_fix['Total Fees']:>16,.2f}",     f"{s_eqp['Total Fees']:>16,.2f}"),
+        ("Final Margin Locked",   f"{pf_B_fixed.margin_locked.iloc[-1].sum():>16,.2f}",
+                                    f"{pf_B_eqprop.margin_locked.iloc[-1].sum():>16,.2f}"),
+    ]
+    for name, a, b in rows:
+        print(f"  {name:<25}  {a}  {b}")
 
 
 if __name__ == "__main__":
