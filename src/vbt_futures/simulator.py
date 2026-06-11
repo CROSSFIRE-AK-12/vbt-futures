@@ -206,13 +206,23 @@ def simulate_futures_nb(
             size_at_t = size[t, col]
 
             # --- PASS 1: handle existing position (exit / reversal) ---
-            # Filled in fully by Tasks 12-14.  For now, only HOLD is implemented
-            # so that we can drive the open-long path (Task 9) and the
-            # mark-to-market / dynamic margin paths first.
             pass1_did_something = False
             if position[col] > 0.0:
-                # Long held: short_entry (reversal, Task 14) or long_exit (Task 12).
-                if long_exits[t, col]:
+                # Long held.
+                if short_entries[t, col]:
+                    # Reversal: close long + open short.
+                    cash, order_idx = _do_close(
+                        col, close[t, col], t, cash, position, avg_price,
+                        margin_locked, mult, fees, fixed_fees, slippage,
+                        orders, order_idx,
+                    )
+                    cash, order_idx = _try_open(
+                        col, -size_at_t, close[t, col], t, cash, position,
+                        avg_price, margin_locked, mult, margin_rate, fees,
+                        fixed_fees, slippage, orders, order_idx,
+                    )
+                    pass1_did_something = True
+                elif long_exits[t, col]:
                     cash, order_idx = _do_close(
                         col, close[t, col], t, cash, position, avg_price,
                         margin_locked, mult, fees, fixed_fees, slippage,
@@ -220,8 +230,21 @@ def simulate_futures_nb(
                     )
                     pass1_did_something = True
             elif position[col] < 0.0:
-                # Short held: long_entry (reversal, Task 14) or short_exit (Task 13).
-                if short_exits[t, col]:
+                # Short held.
+                if long_entries[t, col]:
+                    # Reversal: close short + open long.
+                    cash, order_idx = _do_close(
+                        col, close[t, col], t, cash, position, avg_price,
+                        margin_locked, mult, fees, fixed_fees, slippage,
+                        orders, order_idx,
+                    )
+                    cash, order_idx = _try_open(
+                        col, size_at_t, close[t, col], t, cash, position,
+                        avg_price, margin_locked, mult, margin_rate, fees,
+                        fixed_fees, slippage, orders, order_idx,
+                    )
+                    pass1_did_something = True
+                elif short_exits[t, col]:
                     cash, order_idx = _do_close(
                         col, close[t, col], t, cash, position, avg_price,
                         margin_locked, mult, fees, fixed_fees, slippage,

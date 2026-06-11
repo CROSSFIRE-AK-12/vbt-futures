@@ -269,3 +269,80 @@ def test_mark_to_market_decreases_cash_when_price_rises_short() -> None:
     assert mrg[1, 0] == 102.0
     # equity = 9878 + 102 = 9980 (= 10000 - 20 loss)
     assert cash[1] + mrg[1, 0] == 9_980.0
+
+
+def test_reversal_long_to_short_emits_two_records() -> None:
+    """Holding long 1 lot, short_entry fires -> reverse to short.
+
+    Sequence: OPEN_LONG (t=0), then CLOSE_LONG + OPEN_SHORT at t=1.
+    Total: 3 records (1 open + 2 reversal).  The reversal is a pair: close
+    first (with pnl), then open the new side at the same bar.
+    """
+    T, N = 2, 1
+    close = np.array([[100.0], [102.0]])
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, 0] = True
+    short_entries = np.zeros((T, N), dtype=bool)
+    short_entries[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # 1 open + 2 reversal = 3 records.
+    assert len(orders) == 3
+    assert orders[0]["side"] == 0     # OPEN_LONG
+    assert orders[1]["side"] == 1     # CLOSE_LONG
+    assert orders[2]["side"] == 2     # OPEN_SHORT
+    assert orders[1]["size"] == -1.0
+    assert orders[2]["size"] == -1.0
+    # After reversal, position is -1 and margin is locked for the new short.
+    assert pos[1, 0] == -1.0
+    assert mrg[1, 0] == 102.0
+    # Order of long-open at t=0, reversal records at t=1.
+    assert orders[0]["idx"] == 0
+    assert orders[1]["idx"] == 1
+    assert orders[2]["idx"] == 1
+    # Close_long at 102 with avg entry 100 -> pnl = 1*(102-100)*10 = 20
+    assert orders[1]["pnl"] == 20.0
+    assert orders[1]["price"] == 102.0
+
+
+def test_reversal_short_to_long_emits_two_records() -> None:
+    """Holding short 1 lot, long_entry fires -> reverse to long.
+
+    Sequence: OPEN_SHORT (t=0), then CLOSE_SHORT + OPEN_LONG at t=1.
+    Total: 3 records.
+    """
+    T, N = 2, 1
+    close = np.array([[100.0], [98.0]])
+    short_entries = np.zeros((T, N), dtype=bool)
+    short_entries[0, 0] = True
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    assert len(orders) == 3
+    assert orders[0]["side"] == 2     # OPEN_SHORT
+    assert orders[1]["side"] == 3     # CLOSE_SHORT
+    assert orders[2]["side"] == 0     # OPEN_LONG
+    assert orders[1]["size"] == 1.0
+    assert orders[2]["size"] == 1.0
+    assert pos[1, 0] == 1.0
+    assert mrg[1, 0] == 98.0
+    # Close_short at 98 with avg entry 100 -> pnl = -1*(98-100)*10 = 20
+    assert orders[1]["pnl"] == 20.0
+    assert orders[1]["price"] == 98.0
