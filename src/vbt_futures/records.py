@@ -1,0 +1,33 @@
+"""Record dtype for vbt-futures order output.
+
+Defines `FUTURES_ORDER_DT`, the structured array dtype used by the simulator
+to record every order event in chronological order.  The shape of this dtype
+is part of the public record format and must remain stable.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+_FIELDS = [
+    ("id", np.int64),
+    ("col", np.int64),
+    ("idx", np.int64),
+    ("size", np.float64),
+    ("price", np.float64),
+    ("fees", np.float64),
+    ("margin", np.float64),
+    ("side", np.int64),
+    ("pnl", np.float64),
+]
+
+FUTURES_ORDER_DT: np.dtype = np.dtype(_FIELDS, align=True)
+
+
+def futures_order_dt() -> np.dtype:
+    """Idempotent accessor for the record dtype (kept as a function for back-compat)."""
+    return FUTURES_ORDER_DT
+
+
+def make_empty_records(n: int) -> np.ndarray:
+    """Pre-allocate an uninitialised records array of length n."""
+    return np.empty(n, dtype=FUTURES_ORDER_DT)
