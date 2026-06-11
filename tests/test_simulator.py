@@ -384,3 +384,67 @@ def test_long_exit_then_long_entry_same_bar_emits_two_records() -> None:
     assert mrg[1, 0] == 100.0
     assert orders[1]["pnl"] == 0.0
     assert orders[2]["margin"] == 100.0
+
+
+def test_flat_conflict_skip_when_both_entries_true() -> None:
+    """Both long_entry and short_entry fire on a flat bar.  Default 'skip' -> no order."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    short_entries = np.ones((T, N), dtype=bool)
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),  # skip
+        init_cash=10_000.0,
+    )
+    assert len(orders) == 0
+    assert pos[0, 0] == 0.0
+    assert mrg[0, 0] == 0.0
+    assert cash[0] == 10_000.0
+
+
+def test_flat_conflict_long_when_configured() -> None:
+    """flat_conflict='long' code 0 -> open long when both fire."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    short_entries = np.ones((T, N), dtype=bool)
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([0], dtype=np.int8),  # long
+        init_cash=10_000.0,
+    )
+    assert len(orders) == 1
+    assert orders[0]["side"] == 0     # OPEN_LONG
+    assert pos[0, 0] == 1.0
+
+
+def test_flat_conflict_short_when_configured() -> None:
+    """flat_conflict='short' code 1 -> open short when both fire."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    short_entries = np.ones((T, N), dtype=bool)
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([1], dtype=np.int8),  # short
+        init_cash=10_000.0,
+    )
+    assert len(orders) == 1
+    assert orders[0]["side"] == 2     # OPEN_SHORT
+    assert pos[0, 0] == -1.0
