@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vbt-futures"
+version = "0.1.0"
+description = "Backtrader-style futures backtesting on top of vectorbt's numba framework."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "vbt-futures contributors" }]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "numba>=0.58",
+    "vectorbt>=0.25",
+    "plotly>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-env>=1.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+data = ["akshare"]
+backtest_compare = ["backtrader>=1.9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
