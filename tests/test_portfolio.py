@@ -104,3 +104,56 @@ def test_to_vbt_orders_empty_when_no_orders() -> None:
     df = p.to_vbt_orders()
     assert len(df) == 0
     assert list(df.columns) == ["id", "col", "idx", "size", "price", "fees", "side"]
+
+
+def test_from_signals_smoke() -> None:
+    """End-to-end: 2 contracts, 5 daily bars, simple entry/exit pattern."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0], [101.0, 199.0], [102.0, 198.0], [101.0, 197.0], [103.0, 195.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=5),
+    )
+    long_entries = pd.DataFrame(
+        [[True, False], [False, False], [False, True], [False, False], [False, False]],
+        columns=close.columns, index=close.index,
+    )
+    long_exits = pd.DataFrame(
+        [[False, False], [False, False], [False, False], [False, False], [True, True]],
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, long_entries=long_entries, long_exits=long_exits,
+        specs=[
+            vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+            vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+        ],
+        init_cash=100_000.0,
+        freq="1D",
+    )
+    assert pf.cash.shape == (5,)
+    assert pf.position.shape == (5, 2)
+    # RB long: open 100, close 103 -> pnl 1*3*10=30.  HC long: open 198, close 195 -> pnl -30.
+    assert len(pf.orders) == 4  # 2 opens + 2 closes
+    assert pf.stats()["Total Trades"] == 2
+
+
+def test_from_signals_propagates_validation_error() -> None:
+    """Invalid input (e.g. negative close) should raise ValueError."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[-100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    with pytest.raises(ValueError, match="close 含负值"):
+        vbtf.from_signals(
+            close=close,
+            specs=[
+                vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+                vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+            ],
+            init_cash=100_000.0,
+        )
