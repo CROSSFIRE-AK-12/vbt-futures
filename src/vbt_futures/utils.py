@@ -81,9 +81,9 @@ def _validate_inputs(
             raise ValueError(
                 f"{name} 形状 {sig.shape} 不匹配 close {close.shape}",
             )
-        if sig.dtype != bool:
+        if sig.dtypes.iloc[0] != bool or (sig.dtypes != bool).any():
             raise ValueError(
-                f"{name} 必须 bool 类型, 收到 {sig.dtype}",
+                f"{name} 必须 bool 类型, 收到 {sig.dtypes.iloc[0]}",
             )
 
     _check_signal("long_entries", long_entries)
