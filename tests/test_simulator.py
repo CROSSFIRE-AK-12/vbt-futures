@@ -183,3 +183,89 @@ def test_close_long_releases_margin_and_books_pnl() -> None:
     assert orders[1]["price"] == 105.0
     assert orders[1]["pnl"] == 50.0
     assert orders[1]["margin"] == -100.0
+
+
+def test_open_short_consumes_margin() -> None:
+    """Opening a short position also consumes margin (notional * margin_rate)."""
+    T, N = 2, 1
+    close = _const_close(T, N, 100.0)
+    short_entries = np.zeros((T, N), dtype=bool)
+    short_entries[0, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=_all_false(T, N),
+        long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    assert cash[0] == 9_900.0
+    assert pos[0, 0] == -1.0
+    assert mrg[0, 0] == 100.0
+    assert len(orders) == 1
+    assert orders[0]["side"] == 2     # OPEN_SHORT
+    assert orders[0]["size"] == -1.0
+
+
+def test_close_short_releases_margin_and_books_pnl() -> None:
+    """Open short at 100, close at 95 -> 1*5*10 = 50 pnl."""
+    T, N = 2, 1
+    close = np.array([[100.0], [95.0]])
+    short_entries = np.zeros((T, N), dtype=bool)
+    short_entries[0, 0] = True
+    short_exits = np.zeros((T, N), dtype=bool)
+    short_exits[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=_all_false(T, N),
+        long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=short_exits,
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # t=0: open short, cash=9900, mrg=100, pos=-1
+    assert cash[0] == 9_900.0
+    assert pos[0, 0] == -1.0
+    # t=1:
+    #   STEP 1 mtm: -1*(95-100)*10 = +50 -> cash=9950
+    #   STEP 2 short_exit -> do_close: release 100 + pnl 50 = +150 -> cash=10100
+    assert cash[1] == 10_100.0
+    assert pos[1, 0] == 0.0
+    assert mrg[1, 0] == 0.0
+    assert len(orders) == 2
+    assert orders[0]["side"] == 2     # OPEN_SHORT
+    assert orders[1]["side"] == 3     # CLOSE_SHORT
+    assert orders[1]["size"] == 1.0
+    assert orders[1]["price"] == 95.0
+    assert orders[1]["pnl"] == 50.0
+
+
+def test_mark_to_market_decreases_cash_when_price_rises_short() -> None:
+    """Short 1 lot, price rises 100 -> 102 -> loss of 20."""
+    T, N = 2, 1
+    close = np.array([[100.0], [102.0]])
+    short_entries = np.zeros((T, N), dtype=bool)
+    short_entries[0, 0] = True
+    _, cash, _, mrg = simulate_futures_nb(
+        close=close, long_entries=_all_false(T, N),
+        long_exits=_all_false(T, N),
+        short_entries=short_entries, short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # t=1: mtm = -1*(102-100)*10 = -20 -> cash=9880
+    #      new_margin = 102*10*0.10 = 102 -> cash -= 2 -> 9878
+    assert cash[1] == 9_878.0
+    assert mrg[1, 0] == 102.0
+    # equity = 9878 + 102 = 9980 (= 10000 - 20 loss)
+    assert cash[1] + mrg[1, 0] == 9_980.0
