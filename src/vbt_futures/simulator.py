@@ -206,7 +206,9 @@ def simulate_futures_nb(
             size_at_t = size[t, col]
 
             # --- PASS 1: handle existing position (exit / reversal) ---
-            pass1_did_something = False
+            # Only REVERSAL (close + open opposite side) skips PASS 2.
+            # Plain exit falls through to PASS 2 to allow same-bar re-entry.
+            skip_pass2 = False
             if position[col] > 0.0:
                 # Long held.
                 if short_entries[t, col]:
@@ -221,14 +223,14 @@ def simulate_futures_nb(
                         avg_price, margin_locked, mult, margin_rate, fees,
                         fixed_fees, slippage, orders, order_idx,
                     )
-                    pass1_did_something = True
+                    skip_pass2 = True
                 elif long_exits[t, col]:
                     cash, order_idx = _do_close(
                         col, close[t, col], t, cash, position, avg_price,
                         margin_locked, mult, fees, fixed_fees, slippage,
                         orders, order_idx,
                     )
-                    pass1_did_something = True
+                    # fall through to PASS 2 for same-bar re-entry
             elif position[col] < 0.0:
                 # Short held.
                 if long_entries[t, col]:
@@ -243,16 +245,15 @@ def simulate_futures_nb(
                         avg_price, margin_locked, mult, margin_rate, fees,
                         fixed_fees, slippage, orders, order_idx,
                     )
-                    pass1_did_something = True
+                    skip_pass2 = True
                 elif short_exits[t, col]:
                     cash, order_idx = _do_close(
                         col, close[t, col], t, cash, position, avg_price,
                         margin_locked, mult, fees, fixed_fees, slippage,
                         orders, order_idx,
                     )
-                    pass1_did_something = True
-            # If Pass 1 did something, skip Pass 2 (reversal case).
-            if pass1_did_something:
+                    # fall through to PASS 2 for same-bar re-entry
+            if skip_pass2:
                 continue
 
             # --- PASS 2: handle entry from flat ---

@@ -346,3 +346,41 @@ def test_reversal_short_to_long_emits_two_records() -> None:
     # Close_short at 98 with avg entry 100 -> pnl = -1*(98-100)*10 = 20
     assert orders[1]["pnl"] == 20.0
     assert orders[1]["price"] == 98.0
+
+
+def test_long_exit_then_long_entry_same_bar_emits_two_records() -> None:
+    """Holding long, long_exit AND long_entry both fire on same bar.
+
+    Per spec §5.1: PASS 1 closes the position; then PASS 2 (position==0
+    now) re-opens a long.  Net result: 2 records, both at the same bar.
+    """
+    T, N = 2, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, 0] = True
+    long_entries[1, 0] = True
+    long_exits = np.zeros((T, N), dtype=bool)
+    long_exits[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=long_exits,
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # 3 records: OPEN_LONG (t=0), CLOSE_LONG (t=1), OPEN_LONG (t=1).
+    assert len(orders) == 3
+    assert orders[0]["side"] == 0     # OPEN_LONG at t=0
+    assert orders[1]["side"] == 1     # CLOSE_LONG at t=1
+    assert orders[2]["side"] == 0     # OPEN_LONG at t=1
+    assert orders[1]["idx"] == 1
+    assert orders[2]["idx"] == 1
+    # At t=1: PASS 1 closes at 100 (no pnl since entry 100), PASS 2 reopens at 100.
+    # After t=1: position=1, mrg=100.
+    assert pos[1, 0] == 1.0
+    assert mrg[1, 0] == 100.0
+    assert orders[1]["pnl"] == 0.0
+    assert orders[2]["margin"] == 100.0
