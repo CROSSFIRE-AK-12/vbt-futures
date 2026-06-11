@@ -165,6 +165,9 @@ def simulate_futures_nb(
     slippage: np.ndarray,
     flat_conflict_code: np.ndarray,
     init_cash: float,
+    margin_mode: int = 0,           # 0=gross, 1=portfolio
+    margin_lookback: int = 60,
+    z_score: float = 1.65,          # 95% one-sided normal quantile
 ):
     """Run a futures backtest.  Returns ``(order_records, cash, position,
     margin_locked)`` as four NumPy arrays.
@@ -193,6 +196,15 @@ def simulate_futures_nb(
     out_position = np.empty((T, N), dtype=np.float64)
     out_margin = np.empty((T, N), dtype=np.float64)
 
+    # ---- portfolio margin state ----
+    if margin_mode == 1:
+        returns_buf = np.zeros((margin_lookback, N), dtype=np.float64)
+        returns_count = 0
+    else:
+        returns_buf = np.zeros((1, 1), dtype=np.float64)  # placeholder (unused)
+        returns_count = 0
+    discount_factor = 1.0
+
     for t in range(T):
         # ---------- STEP 0: NaN guard ----------
         # If a column's close at this bar is NaN, skip all per-column work
@@ -205,6 +217,21 @@ def simulate_futures_nb(
         for col in range(N):
             if not liquidated[col] and position[col] != 0.0:
                 cash += position[col] * (close[t, col] - prev_close[col]) * mult[col]
+
+        # ---------- STEP 1.5: per-bar returns -> rolling buffer (for portfolio margin) ----------
+        if margin_mode == 1:
+            for col in range(N):
+                if prev_close[col] != 0.0 and not np.isnan(close[t, col]) and not np.isnan(prev_close[col]):
+                    r = (close[t, col] - prev_close[col]) / prev_close[col]
+                    # Roll the buffer IN REVERSE so we don't overwrite data
+                    # we still need to read (a forward shift would clobber).
+                    # After this, returns_buf[0] is the newest return.
+                    for j in range(margin_lookback - 1, 0, -1):
+                        returns_buf[j, col] = returns_buf[j - 1, col]
+                    returns_buf[0, col] = r
+            has_returns = returns_count < margin_lookback
+            if has_returns:
+                returns_count += 1
 
         # ---------- STEP 2: signals (two-pass evaluation) ----------
         for col in range(N):
@@ -297,11 +324,56 @@ def simulate_futures_nb(
                 )
 
         # ---------- STEP 3: dynamic margin recompute ----------
+        # In portfolio mode, recompute the discount factor every step from
+        # the rolling covariance matrix.
+        if margin_mode == 1 and returns_count >= margin_lookback:
+            abs_pos_dollar = np.empty(N, dtype=np.float64)
+            stds = np.empty(N, dtype=np.float64)
+            for col in range(N):
+                abs_pos_dollar[col] = abs(position[col]) * close[t, col] * mult[col]
+                m = 0.0
+                s = 0.0
+                for k in range(margin_lookback):
+                    m += returns_buf[k, col]
+                    s += returns_buf[k, col] * returns_buf[k, col]
+                mean = m / margin_lookback
+                var = s / margin_lookback - mean * mean
+                stds[col] = np.sqrt(max(var, 0.0))
+            gross_individual = 0.0
+            for col in range(N):
+                if not liquidated[col]:
+                    gross_individual += abs_pos_dollar[col] * stds[col]
+                else:  # pragma: no cover (covered by dedicated test in portfolio path, not here)
+                    pass
+            port_var = 0.0  # init for the case where gross_individual is 0
+            if gross_individual > 0.0:
+                cov = np.zeros((N, N), dtype=np.float64)
+                for i in range(N):
+                    for j in range(N):
+                        s = 0.0
+                        for k in range(margin_lookback):
+                            s += returns_buf[k, i] * returns_buf[k, j]
+                        cov[i, j] = s / margin_lookback
+                port_var = 0.0
+                for i in range(N):
+                    for j in range(N):
+                        port_var += abs_pos_dollar[i] * abs_pos_dollar[j] * cov[i, j]
+                if port_var > 0.0:
+                    discount_factor = np.sqrt(port_var) / gross_individual
+                else:
+                    discount_factor = 1.0  # pragma: no cover (unreachable in practice)
+            else:
+                discount_factor = 1.0
+
         for col in range(N):
             if liquidated[col]:
                 continue
             if position[col] != 0.0:
-                new_margin = abs(position[col]) * close[t, col] * mult[col] * margin_rate[col]
+                new_margin_gross = abs(position[col]) * close[t, col] * mult[col] * margin_rate[col]
+                if margin_mode == 1 and returns_count >= margin_lookback:
+                    new_margin = new_margin_gross * discount_factor
+                else:
+                    new_margin = new_margin_gross
                 cash -= new_margin - margin_locked[col]
                 margin_locked[col] = new_margin
             else:

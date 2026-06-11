@@ -1,0 +1,21 @@
+> """Order side codes and FlatConflict policy mapping for vbt-futures.
+  
+> These are used both inside the njit simulator and in the public API
+> for record side columns.
+> """
+> from typing import Final
+  
+  # Order side codes (used in futures_order_dt.side).
+  # NB: the values are part of the public record format and must remain stable.
+> OPEN_LONG: Final[int] = 0
+> CLOSE_LONG: Final[int] = 1
+> OPEN_SHORT: Final[int] = 2
+> CLOSE_SHORT: Final[int] = 3
+> LIQUIDATED: Final[int] = 4
+  
+  # Mapping from public spec name -> internal int code passed to the simulator.
+> FLAT_CONFLICT_CODE: Final[dict[str, int]] = {
+>     "long": 0,
+>     "short": 1,
+>     "skip": 2,
+> }

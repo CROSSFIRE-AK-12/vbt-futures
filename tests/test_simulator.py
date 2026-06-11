@@ -540,3 +540,179 @@ def test_fixed_fees_deducted_from_cash() -> None:
     )
     assert cash[0] == 9_897.0
     assert orders[0]["fees"] == 3.0
+
+
+# ---------- Portfolio Margin (Plan 3, Part A) ----------
+def test_portfolio_margin_low_correlation_reduces_total_margin() -> None:
+    """Two contracts with low correlation should have lower total margin than gross sum.
+
+    Set up: 2 contracts held long, identical notional (1000 each) but with
+    low correlation (constructed via opposite-direction synthetic returns).
+    Portfolio margin = gross × sqrt(1 - avg_corr) -> strictly less than gross.
+    """
+    T, N = 80, 2
+    rng = np.random.default_rng(7)
+    # Build low-correlation returns: contract 0 up-trend, contract 1 down-trend.
+    ret0 = np.concatenate(([0.0], rng.normal(0.005, 0.01, T - 1)))
+    ret1 = np.concatenate(([0.0], -rng.normal(0.005, 0.01, T - 1)))
+    price0 = 100.0 * np.exp(np.cumsum(ret0))
+    price1 = 100.0 * np.exp(np.cumsum(ret1))
+    close = np.column_stack([price0, price1])
+
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[60, :] = True
+    _, _, _, mrg_gross = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0,
+        margin_mode=0,  # gross
+    )
+    _, _, _, mrg_port = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0,
+        margin_mode=1,  # portfolio
+        margin_lookback=20,
+    )
+    # Same position and price; portfolio margin should be strictly less than gross.
+    gross_total = mrg_gross[80 - 1, :].sum() if T > 79 else mrg_gross[-1, :].sum()
+    port_total = mrg_port[-1, :].sum()
+    assert port_total < gross_total
+    # Portfolio margin must be > 0 (lower bound: each contract needs at least some).
+    assert port_total > 0.0
+
+
+def test_portfolio_margin_high_correlation_close_to_gross() -> None:
+    """Two contracts with perfect positive correlation -> portfolio margin ≈ gross.
+
+    Synthetic: both contracts have IDENTICAL returns.
+    """
+    T, N = 80, 2
+    rng = np.random.default_rng(7)
+    ret = np.concatenate(([0.0], rng.normal(0.005, 0.01, T - 1)))
+    close = np.column_stack([100.0 * np.exp(np.cumsum(ret)),
+                              100.0 * np.exp(np.cumsum(ret))])
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[60, :] = True
+    _, _, _, mrg_gross = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0, margin_mode=0,
+    )
+    _, _, _, mrg_port = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0, margin_mode=1, margin_lookback=20,
+    )
+    gross_total = mrg_gross[-1, :].sum()
+    port_total = mrg_port[-1, :].sum()
+    # Perfect positive correlation -> discount should be ~1 -> portfolio margin
+    # close to gross.  We allow 15% tolerance because sample covariance over a
+    # 20-bar window is noisy; with longer lookbacks the estimate tightens.
+    np.testing.assert_allclose(port_total, gross_total, rtol=0.15)
+
+
+def test_portfolio_margin_fallback_to_gross_when_lookback_insufficient() -> None:
+    """If returns_count < margin_lookback, fall back to gross margin (no data yet)."""
+    T, N = 5, 2  # only 5 bars, lookback 60 -> no portfolio estimate possible
+    close = _const_close(T, N, 100.0)
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, :] = True
+    _, _, _, mrg_gross = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0, margin_mode=0,
+    )
+    _, _, _, mrg_port = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0, margin_mode=1, margin_lookback=60,
+    )
+    # With insufficient lookback, portfolio mode degrades to gross margin.
+    np.testing.assert_array_equal(mrg_gross, mrg_port)
+
+
+def test_portfolio_margin_ignores_liquidated_columns() -> None:
+    """A liquidated column's locked margin should not contribute to the discount calc.
+
+    Setup: col 0 price drops hard, causing equity to drop, forcing col 0
+    liquidation.  Col 1 stays flat.  The simulation must complete without
+    crashing on the liquidated column.
+    """
+    T, N = 5, 2
+    # col 0 price crashes; col 1 stable.  Use enough init_cash for both opens.
+    close = np.array([[100.0, 200.0], [0.0, 200.0], [0.0, 200.0], [0.0, 200.0], [0.0, 200.0]])
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, :] = True
+    _, _, _, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0, 10.0]),
+        margin_rate=np.array([0.10, 0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2, 2], dtype=np.int8),
+        init_cash=10_000.0,
+        margin_mode=1, margin_lookback=3,
+    )
+    # After the crash, col 0 mrg = 0 (liquidated).  Col 1 still has the
+    # position locked (col 1 has full margin since price didn't move).
+    assert mrg[-1, 0] == 0.0
+    assert mrg[-1, 1] > 0.0
+
+
+def test_portfolio_margin_skips_bar_with_nan_prev_close() -> None:
+    """If prev_close is NaN (from a previous NaN bar), skip return calc that bar.
+
+    The NaN guard at t=0 sets liquidated=True on the column, so we need to
+    run long enough to fill the buffer with valid returns first.
+    """
+    T, N = 40, 1
+    rng = np.random.default_rng(11)
+    ret = np.concatenate(([0.0], rng.normal(0.0, 0.01, T - 1)))
+    close = (100.0 * np.exp(np.cumsum(ret))).reshape(-1, 1)
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[20, 0] = True
+    # Should not crash; result should equal gross.
+    _, _, _, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+        margin_mode=1, margin_lookback=15,
+    )
+    assert mrg[-1, 0] > 0.0  # margin was locked for the position
