@@ -259,3 +259,137 @@ def test_from_signals_short_only() -> None:
     assert pf.orders.iloc[0]["side"] == 2  # OPEN_SHORT
     assert pf.orders.iloc[1]["side"] == 3  # CLOSE_SHORT
     assert pf.orders.iloc[1]["pnl"] == 20.0
+
+
+def test_from_signals_margin_mode_portfolio_runs() -> None:
+    """margin_mode='portfolio' should be accepted and produce a valid run."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]] * 80,
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=80),
+    )
+    long_entries = pd.DataFrame(
+        [[False, False]] * 60 + [[True, True]] * 20,
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, long_entries=long_entries,
+        specs=[
+            vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+            vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+        ],
+        init_cash=100_000.0,
+        margin_mode="portfolio",
+        margin_lookback=20,
+    )
+    assert pf.position.iloc[-1, 0] == 1.0
+    assert pf.position.iloc[-1, 1] == 1.0
+
+
+def test_from_signals_invalid_margin_mode_raises() -> None:
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    with pytest.raises(ValueError, match="margin_mode 必须是"):
+        vbtf.from_signals(
+            close=close,
+            specs=[
+                vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+                vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+            ],
+            init_cash=100_000.0,
+            margin_mode="bogus",
+        )
+
+
+def test_from_signals_invalid_margin_lookback_raises() -> None:
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    with pytest.raises(ValueError, match="margin_lookback 必须是"):
+        vbtf.from_signals(
+            close=close,
+            specs=[
+                vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+                vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+            ],
+            init_cash=100_000.0,
+            margin_mode="portfolio",
+            margin_lookback=1,
+        )
+
+
+def test_from_signals_equity_proportional_sizing() -> None:
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0]] * 10,
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=10),
+    )
+    long_entries = pd.DataFrame(
+        [[True], [False], [False], [False], [False], [False], [False], [False], [False], [False]],
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, long_entries=long_entries,
+        specs=[vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10)],
+        init_cash=10_000.0,
+        sizing_mode="equity_proportional",
+        size=1.0,
+    )
+    # Just verify the run succeeded and produced a position.
+    assert pf.position.iloc[-1, 0] == 1.0
+
+
+def test_from_signals_anti_martingale_sizing() -> None:
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0]] * 10,
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=10),
+    )
+    long_entries = pd.DataFrame(
+        [[True], [False], [False], [False], [False], [False], [False], [False], [False], [False]],
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, long_entries=long_entries,
+        specs=[vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10)],
+        init_cash=10_000.0,
+        sizing_mode="anti_martingale",
+        size=1.0,
+        sizing_kwargs={"trigger_pnl": 100.0, "max_size": 5.0},
+    )
+    assert pf.position.iloc[-1, 0] == 1.0
+
+
+def test_from_signals_invalid_sizing_mode_raises() -> None:
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    with pytest.raises(ValueError, match="sizing_mode 必须是"):
+        vbtf.from_signals(
+            close=close,
+            specs=[
+                vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+                vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+            ],
+            init_cash=100_000.0,
+            sizing_mode="bogus",
+        )

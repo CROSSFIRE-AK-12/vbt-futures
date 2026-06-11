@@ -27,6 +27,11 @@ def from_signals(
     freq=None,
     bars_per_year=None,
     trading_days_per_year=252,
+    margin_mode="gross",
+    margin_lookback=60,
+    margin_z_score=1.65,
+    sizing_mode="fixed",
+    sizing_kwargs=None,
 ):
     """Run a futures backtest from a DataFrame of close prices and boolean
     entry/exit signal DataFrames.
@@ -39,12 +44,32 @@ def from_signals(
     from . import utils
     from .enums import FLAT_CONFLICT_CODE
     from .simulator import simulate_futures_nb
+    from .sizing import (
+        SIZE_ANTI_MARTINGALE,
+        SIZE_EQUITY_PROPORTIONAL,
+        SIZE_FIXED,
+        _entry_signal_mask,
+        resolve_size,
+    )
 
     # ---- validate ----
     utils._validate_inputs(
         close, long_entries, long_exits, short_entries, short_exits,
         specs, size, init_cash, freq, bars_per_year, trading_days_per_year,
     )
+    if margin_mode not in ("gross", "portfolio"):
+        raise ValueError(
+            f"margin_mode 必须是 'gross' | 'portfolio', 收到 '{margin_mode}'"
+        )
+    if not isinstance(margin_lookback, int) or margin_lookback < 2:
+        raise ValueError(
+            f"margin_lookback 必须是 >= 2 的整数, 收到 {margin_lookback}"
+        )
+    if sizing_mode not in (SIZE_FIXED, SIZE_EQUITY_PROPORTIONAL, SIZE_ANTI_MARTINGALE):
+        raise ValueError(
+            f"sizing_mode 必须是 {sorted([SIZE_FIXED, SIZE_EQUITY_PROPORTIONAL, SIZE_ANTI_MARTINGALE])}, "
+            f"收到 '{sizing_mode}'"
+        )
 
     T, N = close.shape
 
@@ -65,9 +90,21 @@ def from_signals(
     # ---- broadcast signals to numpy ----
     le = _to_bool(long_entries, "long_entries")
     lx = _to_bool(long_exits, "long_exits")
-    se = _to_bool(short_entries, "short_entries")
+    se = _to_bool(short_entries, "short_exits")
     sx = _to_bool(short_exits, "short_exits")
-    size_arr = _to_size_array(size)
+
+    # ---- resolve size (per sizing mode) ----
+    if sizing_mode == SIZE_FIXED:
+        size_arr = _to_size_array(size)
+    else:
+        entry_mask = _entry_signal_mask(
+            le if long_entries is not None else None,
+            se if short_entries is not None else None,
+        )
+        size_arr = resolve_size(
+            sizing_mode, size, entry_mask,
+            close.values.astype(np.float64), float(init_cash), sizing_kwargs,
+        )
 
     # ---- split specs into per-column arrays ----
     mult = np.array([s.mult for s in specs], dtype=np.float64)
@@ -97,6 +134,9 @@ def from_signals(
         fixed_fees=fixed_fees, slippage=slippage,
         flat_conflict_code=flat_conflict_code,
         init_cash=float(init_cash),
+        margin_mode=0 if margin_mode == "gross" else 1,
+        margin_lookback=margin_lookback,
+        z_score=margin_z_score,
     )
 
     # ---- wrap in portfolio ----
