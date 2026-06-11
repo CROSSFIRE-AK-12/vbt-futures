@@ -56,100 +56,118 @@ def _size_fixed(
 
 
 def _size_equity_proportional(
-    base_size: np.ndarray, signals: np.ndarray, close: np.ndarray, init_cash: float,
+    base_size: np.ndarray,
+    long_entries: np.ndarray,
+    long_exits: np.ndarray,
+    short_entries: np.ndarray,
+    short_exits: np.ndarray,
+    close: np.ndarray,
+    init_cash: float,
 ) -> np.ndarray:
     """Scale size by running equity curve (with mark-to-market).
 
-    We run a forward pass that tracks per-contract equity contributions.
-    On any non-signal bar, size is 0 (no position open).  On signal bars,
-    size = base_size * (equity_so_far / init_equity), floored at 0.
+    Forward-iteration that tracks SIGNED per-contract position:
+      - On ``long_entries[t, col]``: position goes to +size.
+      - On ``short_entries[t, col]``: position goes to -size.
+      - On exits: position -> 0 and PnL is realised into cash.
+    The ``scale`` is the current cash equity (no notional) / init_cash.
+
+    The simulator uses ``size_arr[t, col].abs()`` for the trade size, so
+    the sign here only affects the forward-iteration's PnL tracking.
     """
     T, N = base_size.shape
     out = np.zeros((T, N), dtype=np.float64)
-    position = np.zeros(N, dtype=np.float64)
+    position = np.zeros(N, dtype=np.float64)  # SIGNED: +long, -short
     avg_price = np.zeros(N, dtype=np.float64)
     prev_close = np.empty(N, dtype=np.float64)
     for col in range(N):
         prev_close[col] = close[0, col]
     cash = init_cash
-    cum_equity = init_cash
-    # long_entries, long_exits, etc.  We only need 'entries' = long|short entries
-    # = signals[t, col] > 0.  The caller passes a 2D array where 1 = any entry.
     for t in range(T):
-        # Update equity via mark-to-market before deciding size.
+        # 1. Mark-to-market held positions (PnL flows into cash).
         for col in range(N):
             if position[col] != 0.0:
                 cash += position[col] * (close[t, col] - prev_close[col])
-        cum_equity = cash
-        for col in range(N):
-            cum_equity += position[col] * close[t, col]  # notional value
-        # Scale by equity.
-        if cum_equity > 0.0:
-            scale = cum_equity / init_cash
+        # 2. Compute scale = cash / init_cash.
+        if cash > 0.0:
+            scale = cash / init_cash
         else:
             scale = 0.0
-        # Apply: where there is an entry signal, set size = base * scale.
-        # `signals` is bool: True on entry bars.
+        # 3. Set size for entry bars.
         for col in range(N):
-            if signals[t, col] and position[col] == 0.0:
+            if long_entries[t, col] and position[col] == 0.0:
                 out[t, col] = max(base_size[t, col] * scale, 0.0)
-        # Crude position tracking: assume signal[t] opens at close[t]
+            elif short_entries[t, col] and position[col] == 0.0:
+                out[t, col] = max(base_size[t, col] * scale, 0.0)
+        # 4. Process exits: close position, realise PnL into cash.
         for col in range(N):
-            if signals[t, col] and position[col] == 0.0:
-                position[col] = base_size[t, col]
-                avg_price[col] = close[t, col]
-            elif (not signals[t, col]) and position[col] != 0.0:
-                # Naive: any non-entry bar closes.  Caller controls via their
-                # own signal logic; we just need a forward estimate of equity.
+            if (long_exits[t, col] or short_exits[t, col]) and position[col] != 0.0:
                 cash += position[col] * (close[t, col] - avg_price[col])
                 position[col] = 0.0
                 avg_price[col] = 0.0
+        # 5. Process entries: open position (signed).
+        for col in range(N):
+            if long_entries[t, col] and position[col] == 0.0:
+                position[col] = out[t, col]
+                avg_price[col] = close[t, col]
+            elif short_entries[t, col] and position[col] == 0.0:
+                position[col] = -out[t, col]
+                avg_price[col] = close[t, col]
         for col in range(N):
             prev_close[col] = close[t, col]
     return out
 
 
 def _size_anti_martingale(
-    base_size: np.ndarray, signals: np.ndarray, _close: np.ndarray, _init_cash: float,
+    base_size: np.ndarray,
+    long_entries: np.ndarray,
+    long_exits: np.ndarray,
+    short_entries: np.ndarray,
+    short_exits: np.ndarray,
+    _close: np.ndarray,
+    _init_cash: float,
     trigger_pnl: float = 1_000.0,
     max_size: float = 5.0,
 ) -> np.ndarray:
-    """Size grows by 1 unit per `trigger_pnl` of cumulative PnL, capped at `max_size`.
+    """Size grows by 1 unit per ``trigger_pnl`` of cumulative PnL, capped.
 
-    Negative PnL does NOT decrease size (anti-martingale is the inverse of
-    martingale).  The base_size is the minimum; we add 0.0 *|cum_pnl|/trigger
-    of bonus (with size = base_size + bonus) when cum_pnl > 0.
+    Signed positions; same direction logic as ``_size_equity_proportional``.
     """
     T, N = base_size.shape
     out = base_size.copy()
     cum_pnl = 0.0
-    # Approximate PnL via a simple equity tracker.
-    position = np.zeros(N, dtype=np.float64)
+    position = np.zeros(N, dtype=np.float64)  # SIGNED
     avg_price = np.zeros(N, dtype=np.float64)
     prev_close = np.empty(N, dtype=np.float64)
     for col in range(N):
         prev_close[col] = _close[0, col]
     for t in range(T):
-        # mtM
+        # mtm
         for col in range(N):
             if position[col] != 0.0:
                 cum_pnl += position[col] * (_close[t, col] - prev_close[col])
-        # Decide size on entry bars based on cum_pnl.
+        # bonus
         if cum_pnl > 0.0:
             bonus = cum_pnl / max(trigger_pnl, 1e-9)
         else:
             bonus = 0.0
+        # entries
         for col in range(N):
-            if signals[t, col] and position[col] == 0.0:
+            if (long_entries[t, col] or short_entries[t, col]) and position[col] == 0.0:
                 out[t, col] = min(base_size[t, col] + bonus, max_size)
-        # Naive position tracking.
+        # exits
         for col in range(N):
-            if signals[t, col] and position[col] == 0.0:
-                position[col] = out[t, col]
-                avg_price[col] = _close[t, col]
-            elif (not signals[t, col]) and position[col] != 0.0:
+            if (long_exits[t, col] or short_exits[t, col]) and position[col] != 0.0:
                 position[col] = 0.0
                 avg_price[col] = 0.0
+        # entries (signed)
+        for col in range(N):
+            if long_entries[t, col] and position[col] == 0.0:
+                position[col] = out[t, col]
+                avg_price[col] = _close[t, col]
+            elif short_entries[t, col] and position[col] == 0.0:
+                position[col] = -out[t, col]
+                avg_price[col] = _close[t, col]
         for col in range(N):
             prev_close[col] = _close[t, col]
     return out
@@ -158,26 +176,34 @@ def _size_anti_martingale(
 def resolve_size(
     mode: str,
     base_size: float | np.ndarray | pd.DataFrame,
-    signals: np.ndarray,
+    long_entries: np.ndarray,
+    long_exits: np.ndarray,
+    short_entries: np.ndarray,
+    short_exits: np.ndarray,
     close: np.ndarray,
     init_cash: float,
     sizing_kwargs: dict[str, Any] | None = None,
 ) -> np.ndarray:
-    """Compute the (T, N) size array for the given mode.
-
-    ``base_size`` is the user-supplied input (scalar / 1D / 2D).
-    ``signals`` is a bool (T, N) array — True on any entry bar (long or short).
-    """
-    T, N = signals.shape
+    """Compute the (T, N) size array for the given mode."""
+    T, N = long_entries.shape
     base = _broadcast_size(base_size, T, N)
+    if long_exits is None:
+        long_exits = np.zeros_like(long_entries)
+    if short_exits is None:
+        short_exits = np.zeros_like(short_entries)
+    entry_mask = long_entries | short_entries
     if mode == SIZE_FIXED:
-        return _size_fixed(base, signals, close, init_cash)
+        return _size_fixed(base, entry_mask, close, init_cash)
     if mode == SIZE_EQUITY_PROPORTIONAL:
-        return _size_equity_proportional(base, signals, close, init_cash)
+        return _size_equity_proportional(
+            base, long_entries, long_exits, short_entries, short_exits,
+            close, init_cash,
+        )
     if mode == SIZE_ANTI_MARTINGALE:
         kwargs = sizing_kwargs or {}
         return _size_anti_martingale(
-            base, signals, close, init_cash,
+            base, long_entries, long_exits, short_entries, short_exits,
+            close, init_cash,
             trigger_pnl=float(kwargs.get("trigger_pnl", 1_000.0)),
             max_size=float(kwargs.get("max_size", 5.0)),
         )
@@ -197,4 +223,20 @@ def _entry_signal_mask(
         out |= long_entries
     if short_entries is not None:
         out |= short_entries
+    return out
+
+
+def _exit_signal_mask(
+    long_exits: np.ndarray | None,
+    short_exits: np.ndarray | None,
+) -> np.ndarray:
+    """OR together long and short exit signals (any exit = True)."""
+    if long_exits is None and short_exits is None:
+        return None  # type: ignore[return-value]
+    T, N = (long_exits if long_exits is not None else short_exits).shape
+    out = np.zeros((T, N), dtype=bool)
+    if long_exits is not None:
+        out |= long_exits
+    if short_exits is not None:
+        out |= short_exits
     return out

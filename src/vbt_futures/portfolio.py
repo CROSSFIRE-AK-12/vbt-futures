@@ -26,7 +26,9 @@ class FuturesPortfolio:
     _position: np.ndarray
     _margin_locked: np.ndarray
     _entry_mask_long: np.ndarray = None  # type: ignore[assignment]
+    _entry_mask_long_exit: np.ndarray = None  # type: ignore[assignment]
     _entry_mask_short: np.ndarray = None  # type: ignore[assignment]
+    _entry_mask_short_exit: np.ndarray = None  # type: ignore[assignment]
 
     # ---------- derived scalars (cached) ----------
     @cached_property
@@ -289,17 +291,18 @@ class FuturesPortfolio:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        from .sizing import _entry_signal_mask, resolve_size
+        from .sizing import resolve_size
 
         T, N = self.close.shape
         if sizing_mode == "fixed":
             size_arr = np.full((T, N), float(base_size), dtype=np.float64)
         else:
-            entry_mask = _entry_signal_mask(
-                self._entry_mask_long, self._entry_mask_short,
-            )
             size_arr = resolve_size(
-                sizing_mode, base_size, entry_mask,
+                sizing_mode, base_size,
+                self._entry_mask_long,
+                self._entry_mask_long_exit if hasattr(self, "_entry_mask_long_exit") else None,
+                self._entry_mask_short,
+                self._entry_mask_short_exit if hasattr(self, "_entry_mask_short_exit") else None,
                 self.close.values.astype(np.float64),
                 float(self.init_cash), sizing_kwargs,
             )

@@ -97,12 +97,9 @@ def from_signals(
     if sizing_mode == SIZE_FIXED:
         size_arr = _to_size_array(size)
     else:
-        entry_mask = _entry_signal_mask(
-            le if long_entries is not None else None,
-            se if short_entries is not None else None,
-        )
         size_arr = resolve_size(
-            sizing_mode, size, entry_mask,
+            sizing_mode, size,
+            le, lx, se, sx,
             close.values.astype(np.float64), float(init_cash), sizing_kwargs,
         )
 
@@ -152,7 +149,9 @@ def from_signals(
         _position=position,
         _margin_locked=margin_locked,
         _entry_mask_long=le,
+        _entry_mask_long_exit=lx,
         _entry_mask_short=se,
+        _entry_mask_short_exit=sx,
     )
 
 
