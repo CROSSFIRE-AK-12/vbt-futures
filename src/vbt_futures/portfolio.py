@@ -25,6 +25,8 @@ class FuturesPortfolio:
     _cash: np.ndarray
     _position: np.ndarray
     _margin_locked: np.ndarray
+    _entry_mask_long: np.ndarray = None  # type: ignore[assignment]
+    _entry_mask_short: np.ndarray = None  # type: ignore[assignment]
 
     # ---------- derived scalars (cached) ----------
     @cached_property
@@ -270,6 +272,102 @@ class FuturesPortfolio:
             row=2, col=1,
         )
         fig.update_layout(height=700, title_text="vbt-futures backtest")
+        return fig
+
+    # ---------- sizing visualization ----------
+    def plot_sizing(
+        self,
+        base_size: float | np.ndarray | pd.DataFrame = 1.0,
+        sizing_mode: str = "fixed",
+        sizing_kwargs: dict | None = None,
+    ):
+        """Plot size-on-entry vs equity curve (two stacked panels).
+
+        Useful for verifying that ``sizing_mode`` actually responds to
+        changes in total account equity.
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        from .sizing import _entry_signal_mask, resolve_size
+
+        T, N = self.close.shape
+        if sizing_mode == "fixed":
+            size_arr = np.full((T, N), float(base_size), dtype=np.float64)
+        else:
+            entry_mask = _entry_signal_mask(
+                self._entry_mask_long, self._entry_mask_short,
+            )
+            size_arr = resolve_size(
+                sizing_mode, base_size, entry_mask,
+                self.close.values.astype(np.float64),
+                float(self.init_cash), sizing_kwargs,
+            )
+
+        # Find entry bars.
+        pos = self._position
+        any_pos = (pos != 0).any(axis=1)
+        prev_any = np.concatenate(([False], any_pos[:-1]))
+        entry_bars = np.where(any_pos & ~prev_any)[0]
+
+        # Equity & size on entry.
+        eq_arr = self.equity.values
+        size_on_entry = np.array([
+            size_arr[t, :].mean() if np.any(size_arr[t, :] > 0) else np.nan
+            for t in entry_bars
+        ])
+        eq_on_entry = eq_arr[entry_bars]
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.6, 0.4], vertical_spacing=0.08,
+            subplot_titles=("Equity curve (with entry markers)",
+                            "Size on entry bars"),
+        )
+        # Top: equity curve.
+        fig.add_trace(
+            go.Scatter(
+                x=self.equity.index, y=eq_arr,
+                mode="lines", name="equity",
+                line=dict(color="steelblue", width=2),
+            ),
+            row=1, col=1,
+        )
+        # Mark entry bars on the equity curve.
+        fig.add_trace(
+            go.Scatter(
+                x=self.equity.index[entry_bars], y=eq_on_entry,
+                mode="markers", name="entry",
+                marker=dict(symbol="triangle-up", size=10, color="orange"),
+            ),
+            row=1, col=1,
+        )
+        # Bottom: size on entry vs equity.
+        fig.add_trace(
+            go.Scatter(
+                x=eq_on_entry, y=size_on_entry,
+                mode="markers+lines",
+                name="size (vs equity)",
+                marker=dict(size=10, color="darkgreen"),
+                line=dict(color="darkgreen", width=1),
+            ),
+            row=2, col=1,
+        )
+        # Reference line: size = base_size.
+        fig.add_hline(
+            y=float(np.mean(size_arr[0, :])), line_dash="dash",
+            line_color="gray", opacity=0.5,
+            row=2, col=1,
+        )
+        fig.update_xaxes(title_text="equity at entry (cash + locked margin)",
+                         row=2, col=1)
+        fig.update_yaxes(title_text="equity", row=1, col=1)
+        fig.update_yaxes(title_text="size (lots)", row=2, col=1)
+        fig.update_layout(
+            height=750,
+            title_text=f"vbt-futures: sizing behaviour ({sizing_mode})",
+            showlegend=True,
+        )
         return fig
 
     # ---------- vbt interop ----------

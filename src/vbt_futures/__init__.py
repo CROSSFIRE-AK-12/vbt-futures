@@ -151,6 +151,8 @@ def from_signals(
         _cash=cash,
         _position=position,
         _margin_locked=margin_locked,
+        _entry_mask_long=le,
+        _entry_mask_short=se,
     )
 
 

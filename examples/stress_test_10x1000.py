@@ -14,6 +14,7 @@ Run:
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -354,6 +355,29 @@ def main() -> None:
     ]
     for name, a, b in rows:
         print(f"  {name:<25}  {a}  {b}")
+
+    # -----------------------------------------------------------------
+    # Write the size-vs-equity plots for Scenarios A and C.
+    # -----------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("WRITING PLOTS")
+    print("=" * 70)
+    os.makedirs("output", exist_ok=True)
+    # Scenario A: size grows with equity.
+    fig_A = pf_A_eqprop.plot_sizing(
+        base_size=10.0, sizing_mode="equity_proportional",
+    )
+    out_A = "output/stress_A_sizing_grows.html"
+    fig_A.write_html(out_A)
+    print(f"  Scenario A (size GROWS with equity):  {out_A}")
+
+    # Scenario C: size shrinks with equity.
+    fig_C = pf_C_eqprop.plot_sizing(
+        base_size=10.0, sizing_mode="equity_proportional",
+    )
+    out_C = "output/stress_C_sizing_shrinks.html"
+    fig_C.write_html(out_C)
+    print(f"  Scenario C (size SHRINKS with equity): {out_C}")
 
 
 if __name__ == "__main__":

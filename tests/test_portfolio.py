@@ -133,6 +133,47 @@ def test_stats_with_no_trades() -> None:
     assert s["Max Position"] == 0.0
 
 
+def test_plot_sizing_returns_plotly_figure() -> None:
+    """plot_sizing() should return a Figure with 4 traces (equity, entries, size, hline)."""
+    import plotly.graph_objects as go
+    close = pd.DataFrame(
+        [[100.0, 200.0]] * 5,
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=5),
+    )
+    # Simulate a long position that grows equity via mark-to-market.
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.10)),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.array([10_000.0, 10_100.0, 10_200.0, 10_300.0, 10_400.0]),
+        _position=np.zeros((5, 2)),
+        _margin_locked=np.zeros((5, 2)),
+        _entry_mask_long=np.zeros((5, 2), dtype=bool),
+        _entry_mask_short=np.zeros((5, 2), dtype=bool),
+    )
+    # fixed mode (no entry_mask needed, but we pass them anyway).
+    fig_fixed = p.plot_sizing(base_size=2.0, sizing_mode="fixed")
+    assert isinstance(fig_fixed, go.Figure)
+    # Should have at least 3 traces: equity line, entry markers, size scatter.
+    assert len(fig_fixed.data) >= 3
+
+    # equity_proportional mode uses entry masks.
+    p2 = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.10)),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.array([10_000.0, 10_100.0, 10_200.0, 10_300.0, 10_400.0]),
+        _position=np.zeros((5, 2)),
+        _margin_locked=np.zeros((5, 2)),
+        _entry_mask_long=np.array([[True, False]] * 5, dtype=bool),
+        _entry_mask_short=np.zeros((5, 2), dtype=bool),
+    )
+    fig_eq = p2.plot_sizing(base_size=1.0, sizing_mode="equity_proportional")
+    assert isinstance(fig_eq, go.Figure)
+    assert len(fig_eq.data) >= 3
+
+
 def test_from_signals_smoke() -> None:
     """End-to-end: 2 contracts, 5 daily bars, simple entry/exit pattern."""
     import vbt_futures as vbtf
