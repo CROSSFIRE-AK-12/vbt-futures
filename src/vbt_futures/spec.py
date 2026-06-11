@@ -1,0 +1,38 @@
+"""Per-contract specification for vbt-futures backtests.
+
+Each `FuturesSpec` carries the market microstructure constants for a single
+futures contract: contract multiplier, margin rate, fees, and slippage.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class FuturesSpec:
+    """Immutable per-contract specification.
+
+    Attributes:
+        symbol: A short identifier (e.g. ``"RB"``).
+        mult: Contract multiplier (e.g. 10.0 means 1 lot = 10 units of the
+            underlying; P&L is computed as ``size * price_diff * mult``).
+        margin_rate: Margin rate applied to notional (e.g. 0.10 = 10%).
+        fees: Commission as a fraction of notional (e.g. 2e-4 = 0.02%).
+        fixed_fees: Fixed commission in currency units per lot.
+        slippage: Slippage applied to fills as a fraction of price.
+        tick_size: Minimum price increment (recorded for the user's reference;
+            the simulator does not enforce tick rounding in v1).
+        flat_conflict: When both ``long_entry`` and ``short_entry`` are True
+            while flat, this controls behaviour.  Must be one of
+            ``"long"`` (default to long), ``"short"`` (default to short),
+            or ``"skip"`` (do nothing).
+    """
+
+    symbol: str
+    mult: float
+    margin_rate: float
+    fees: float = 0.0
+    fixed_fees: float = 0.0
+    slippage: float = 0.0
+    tick_size: float = 0.01
+    flat_conflict: str = "skip"
