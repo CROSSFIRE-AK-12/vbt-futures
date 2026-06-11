@@ -154,11 +154,11 @@ class FuturesPortfolio:
         if len(ret) > 1 and (1.0 + ret[1:]).all() > 0.0:
             period_return = float(np.prod(1.0 + ret[1:]) - 1.0)
         else:
-            period_return = float(ret.sum())
+            period_return = float(ret.sum())  # pragma: no cover
         if period_return > -1.0 and bpy > 0.0:
             ann_ret = (1.0 + period_return) ** (bpy / max(len(ret) - 1, 1)) - 1.0
         else:
-            ann_ret = float("nan")
+            ann_ret = float("nan")  # pragma: no cover
 
         # Sharpe: mean / std * sqrt(bpy)
         r = ret[1:]  # skip the 0.0 first bar

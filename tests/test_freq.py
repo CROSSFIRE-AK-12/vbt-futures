@@ -81,3 +81,19 @@ def test_infer_bars_per_year_handles_int_index_type() -> None:
     idx = _daily_index(10)
     result = infer_bars_per_year(idx)
     assert isinstance(result, float)
+
+
+def test_infer_bars_per_year_empty_index() -> None:
+    """Empty index -> 0.0."""
+    idx = pd.DatetimeIndex([])
+    assert infer_bars_per_year(idx) == 0.0
+
+
+def test_infer_bars_per_year_non_datetime_index_raises() -> None:
+    with pytest.raises(ValueError, match="infer_bars_per_year 要求 pd.DatetimeIndex"):
+        infer_bars_per_year(pd.Index([1, 2, 3]))  # type: ignore[arg-type]
+
+
+def test_infer_bars_per_year_non_positive_trading_days_raises() -> None:
+    with pytest.raises(ValueError, match="trading_days_per_year 必须 > 0"):
+        infer_bars_per_year(_daily_index(5), trading_days_per_year=0)

@@ -157,3 +157,105 @@ def test_from_signals_propagates_validation_error() -> None:
             ],
             init_cash=100_000.0,
         )
+
+
+def test_from_signals_size_as_array() -> None:
+    """size can be a 1D array (one size per column) instead of a scalar."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    pf = vbtf.from_signals(
+        close=close,
+        long_entries=pd.DataFrame([[True, True]], columns=close.columns, index=close.index),
+        specs=[
+            vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+            vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+        ],
+        size=np.array([2.0, 3.0]),  # 2 lots RB, 3 lots HC
+        init_cash=100_000.0,
+    )
+    assert pf.orders.iloc[0]["size"] == 2.0
+    assert pf.orders.iloc[1]["size"] == 3.0
+
+
+def test_from_signals_size_as_2d_dataframe() -> None:
+    """size can also be a (T, N) DataFrame (per-bar, per-column sizes)."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0], [101.0, 199.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=2),
+    )
+    long_entries = pd.DataFrame(
+        [[True, True], [False, False]],
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, long_entries=long_entries,
+        specs=[
+            vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+            vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+        ],
+        size=pd.DataFrame(
+            [[2.0, 3.0], [4.0, 5.0]],
+            columns=close.columns, index=close.index,
+        ),
+        init_cash=100_000.0,
+    )
+    assert pf.orders.iloc[0]["size"] == 2.0
+    assert pf.orders.iloc[1]["size"] == 3.0
+
+
+def test_from_signals_bars_per_year_override() -> None:
+    """When bars_per_year is supplied, it's stored unchanged."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    pf = vbtf.from_signals(
+        close=close,
+        specs=[
+            vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10),
+            vbtf.FuturesSpec("HC", mult=10.0, margin_rate=0.10),
+        ],
+        init_cash=100_000.0,
+        bars_per_year=4032.0,
+    )
+    assert pf.bars_per_year == 4032.0
+
+
+def test_from_signals_short_only() -> None:
+    """Only short_entries -> open and close shorts."""
+    import vbt_futures as vbtf
+
+    close = pd.DataFrame(
+        [[100.0], [99.0], [98.0]],
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=3),
+    )
+    short_entries = pd.DataFrame(
+        [[True], [False], [False]],
+        columns=close.columns, index=close.index,
+    )
+    short_exits = pd.DataFrame(
+        [[False], [False], [True]],
+        columns=close.columns, index=close.index,
+    )
+    pf = vbtf.from_signals(
+        close=close, short_entries=short_entries, short_exits=short_exits,
+        specs=[vbtf.FuturesSpec("RB", mult=10.0, margin_rate=0.10)],
+        init_cash=10_000.0,
+    )
+    # Short: open 100, close 98 -> pnl -1 * (98-100) * 10 = 20.
+    assert len(pf.orders) == 2
+    assert pf.orders.iloc[0]["side"] == 2  # OPEN_SHORT
+    assert pf.orders.iloc[1]["side"] == 3  # CLOSE_SHORT
+    assert pf.orders.iloc[1]["pnl"] == 20.0

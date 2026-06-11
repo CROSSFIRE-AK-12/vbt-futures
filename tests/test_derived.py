@@ -131,9 +131,7 @@ def test_trades_pairing_yields_one_trade(simple_portfolio: FuturesPortfolio) -> 
     assert t["is_liquidated"].iloc[0] == False  # noqa: E712 (numpy bool)
 
 
-def test_trades_pairing_with_reversal(  # noqa: D401
-    two_col_records, two_col_state,
-) -> None:
+def test_trades_pairing_with_reversal(two_col_state) -> None:
     """Reversal (close+open) creates two separate trades in the same bar."""
     # Add a CLOSE_LONG+OPEN_SHORT pair to col 0 at bar 1.
     recs = np.empty(5, dtype=FUTURES_ORDER_DT)
@@ -163,3 +161,62 @@ def test_trades_pairing_with_reversal(  # noqa: D401
     assert t["pnl"].tolist()[0] == 20.0
     assert t["pnl"].tolist()[1] == 20.0
     assert t["size"].tolist()[1] == -1.0  # short side
+
+
+def test_orders_empty_when_no_records() -> None:
+    """orders returns empty DataFrame with the expected columns when no orders."""
+    close = pd.DataFrame(
+        [[100.0, 200.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.05)),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.array([10_000.0]),
+        _position=np.array([[0.0, 0.0]]),
+        _margin_locked=np.array([[0.0, 0.0]]),
+    )
+    assert len(p.orders) == 0
+    assert len(p.trades) == 0
+
+
+def test_trades_skips_close_without_open() -> None:
+    """A close-side order without a prior open should not produce a trade row."""
+    recs = np.empty(1, dtype=FUTURES_ORDER_DT)
+    recs[0] = (0, 0, 0, -1.0, 100.0, 0.0, 0.0, 1, 0.0)  # CLOSE_LONG with no prior open
+    close = pd.DataFrame(
+        [[100.0]],
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10),),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=recs,
+        _cash=np.array([10_000.0]),
+        _position=np.array([[0.0]]),
+        _margin_locked=np.array([[0.0]]),
+    )
+    assert len(p.trades) == 0
+
+
+def test_plot_handles_no_orders() -> None:
+    """plot() should still produce a figure when there are no orders."""
+    close = pd.DataFrame(
+        [[100.0]],
+        columns=["RB"],
+        index=pd.bdate_range("2024-01-02", periods=1),
+    )
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10),),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.array([10_000.0]),
+        _position=np.array([[0.0]]),
+        _margin_locked=np.array([[0.0]]),
+    )
+    fig = p.plot()
+    # 1 close + 1 equity + 1 drawdown = 3 traces (no order markers).
+    assert len(fig.data) == 3

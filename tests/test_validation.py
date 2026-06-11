@@ -245,3 +245,15 @@ def test_valid_inputs_pass(good_close: pd.DataFrame) -> None:
         size=1.0, init_cash=10_000.0,
         freq="1D", bars_per_year=None, trading_days_per_year=252,
     )
+
+
+def test_long_exits_not_dataframe_raises(good_close: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="long_exits 必须是 pd.DataFrame"):
+        _validate_inputs(
+            close=good_close, long_entries=None,
+            long_exits="not a df",  # type: ignore[arg-type]
+            short_entries=None, short_exits=None,
+            specs=[FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.10)],
+            size=1.0, init_cash=10_000.0,
+            freq="1D", bars_per_year=None, trading_days_per_year=252,
+        )
