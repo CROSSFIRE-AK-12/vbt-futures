@@ -185,7 +185,7 @@ def simulate_futures_nb(
 
     # ---- pre-allocate output record buffer ----
     max_orders = 2 * T * N
-    orders = make_empty_records(max_orders)
+    orders = np.empty(max_orders, dtype=FUTURES_ORDER_DT)
     order_idx = 0
 
     # ---- output time series ----
