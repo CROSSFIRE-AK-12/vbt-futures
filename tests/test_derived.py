@@ -103,3 +103,63 @@ def test_returns_first_bar_is_zero(simple_portfolio: FuturesPortfolio) -> None:
 def test_drawdown_is_non_positive(simple_portfolio: FuturesPortfolio) -> None:
     dd = simple_portfolio.drawdown
     assert (dd <= 0.0).all()
+
+
+def test_orders_dataframe_has_expected_columns(simple_portfolio: FuturesPortfolio) -> None:
+    o = simple_portfolio.orders
+    assert list(o.columns) == [
+        "id", "col", "idx", "size", "price", "fees",
+        "margin", "side", "pnl", "symbol", "timestamp",
+    ]
+    assert len(o) == 3
+    assert o["symbol"].iloc[0] == "RB"
+    assert o["symbol"].iloc[1] == "HC"
+
+
+def test_trades_pairing_yields_one_trade(simple_portfolio: FuturesPortfolio) -> None:
+    """3 orders: OPEN_LONG(RB), OPEN_SHORT(HC), CLOSE_LONG(RB) -> 1 trade (RB)."""
+    t = simple_portfolio.trades
+    assert list(t.columns) == [
+        "col", "symbol", "entry_time", "entry_price", "exit_time",
+        "exit_price", "size", "pnl", "fees", "duration_bars",
+        "is_liquidated",
+    ]
+    assert len(t) == 1
+    assert t["symbol"].iloc[0] == "RB"
+    assert t["size"].iloc[0] == 1.0
+    assert t["pnl"].iloc[0] == 20.0
+    assert t["is_liquidated"].iloc[0] == False  # noqa: E712 (numpy bool)
+
+
+def test_trades_pairing_with_reversal(  # noqa: D401
+    two_col_records, two_col_state,
+) -> None:
+    """Reversal (close+open) creates two separate trades in the same bar."""
+    # Add a CLOSE_LONG+OPEN_SHORT pair to col 0 at bar 1.
+    recs = np.empty(5, dtype=FUTURES_ORDER_DT)
+    recs[0] = (0, 0, 0,  1.0, 100.0, 0.0,  100.0, 0, 0.0)   # OPEN_LONG
+    recs[1] = (1, 1, 0, -1.0, 200.0, 0.0,   50.0, 2, 0.0)   # OPEN_SHORT HC
+    recs[2] = (2, 0, 1, -1.0, 102.0, 0.0, -100.0, 1, 20.0)  # CLOSE_LONG
+    recs[3] = (3, 0, 1, -1.0, 102.0, 0.0,  102.0, 2, 0.0)   # OPEN_SHORT
+    recs[4] = (4, 0, 1,  1.0, 100.0, 0.0, -102.0, 3, 20.0)  # CLOSE_SHORT pnl 20
+    cash, pos, mrg = two_col_state
+    T = 2
+    close = pd.DataFrame(
+        [[100.0, 200.0], [102.0, 198.0]],
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=T),
+    )
+    p = FuturesPortfolio(
+        close=close,
+        specs=(FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.05)),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=recs, _cash=cash, _position=pos, _margin_locked=mrg,
+    )
+    t = p.trades
+    # Expect 2 trades: RB long (recs 0+2) and RB short (recs 3+4 from reversal).
+    # HC has only an OPEN_SHORT and no matching close -> no trade.
+    assert len(t) == 2
+    assert t["symbol"].tolist() == ["RB", "RB"]
+    assert t["pnl"].tolist()[0] == 20.0
+    assert t["pnl"].tolist()[1] == 20.0
+    assert t["size"].tolist()[1] == -1.0  # short side
