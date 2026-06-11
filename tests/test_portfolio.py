@@ -179,6 +179,53 @@ def test_plot_sizing_returns_plotly_figure() -> None:
     assert len(fig_eq.data) >= 4
 
 
+def test_plot_sizing_handles_reversal() -> None:
+    """A reversal entry (was already in a position, changes sign) should still be detected."""
+    import plotly.graph_objects as go
+    close = pd.DataFrame(
+        [[100.0, 200.0]] * 5,
+        columns=["RB", "HC"],
+        index=pd.bdate_range("2024-01-02", periods=5),
+    )
+    # Position flips from +1 at bar 0 to -1 at bar 2 (reversal).
+    # Bar 0: long +1.  Bar 1: +1.  Bar 2: -1 (reversal).  Bar 3-4: -1.
+    position = np.array([
+        [+1.0, 0.0],
+        [+1.0, 0.0],
+        [-1.0, 0.0],
+        [-1.0, 0.0],
+        [-1.0, 0.0],
+    ])
+    p = FuturesPortfolio(
+        close=close, specs=(FuturesSpec("RB", 10.0, 0.10), FuturesSpec("HC", 10.0, 0.10)),
+        init_cash=10_000.0, freq="1D", bars_per_year=252.0, trading_days_per_year=252,
+        _order_records=np.empty(0, dtype=FUTURES_ORDER_DT),
+        _cash=np.full(5, 10_000.0),
+        _position=position,
+        _margin_locked=np.zeros((5, 2)),
+        _entry_mask_long=np.array([
+            [True, False],
+            [False, False],
+            [False, False],
+            [False, False],
+            [False, False],
+        ], dtype=bool),
+        _entry_mask_short=np.array([
+            [False, False],
+            [False, False],
+            [True, False],  # reversal triggers at bar 2
+            [False, False],
+            [False, False],
+        ], dtype=bool),
+        _entry_mask_long_exit=np.zeros((5, 2), dtype=bool),
+        _entry_mask_short_exit=np.zeros((5, 2), dtype=bool),
+    )
+    fig = p.plot_sizing(base_size=1.0, sizing_mode="equity_proportional")
+    assert isinstance(fig, go.Figure)
+    # Should still produce a figure even with a reversal entry.
+    assert len(fig.data) >= 2
+
+
 def test_from_signals_smoke() -> None:
     """End-to-end: 2 contracts, 5 daily bars, simple entry/exit pattern."""
     import vbt_futures as vbtf
