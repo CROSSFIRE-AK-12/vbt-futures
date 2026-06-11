@@ -13,7 +13,81 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
+from .enums import (
+    CLOSE_LONG,
+    CLOSE_SHORT,
+    FLAT_CONFLICT_CODE,
+    LIQUIDATED,
+    OPEN_LONG,
+    OPEN_SHORT,
+)
 from .records import FUTURES_ORDER_DT, make_empty_records
+
+# FLAT_CONFLICT_CODE is exposed publicly; declare alias for the simulator
+# to keep the njit body terse.
+_FLAT_LONG = FLAT_CONFLICT_CODE["long"]
+_FLAT_SHORT = FLAT_CONFLICT_CODE["short"]
+_FLAT_SKIP = FLAT_CONFLICT_CODE["skip"]
+
+
+@njit(cache=True)
+def _try_open(
+    col: int,
+    signed_size: float,
+    price: float,
+    bar_idx: int,
+    cash: float,
+    position: np.ndarray,
+    avg_price: np.ndarray,
+    margin_locked: np.ndarray,
+    mult: np.ndarray,
+    margin_rate: np.ndarray,
+    fees: np.ndarray,
+    fixed_fees: np.ndarray,
+    slippage: np.ndarray,
+    orders: np.ndarray,
+    order_idx: int,
+) -> tuple[float, int]:
+    """Try to open a position.  Returns ``(new_cash, new_order_idx)``.
+
+    On rejection (insufficient cash) returns the cash unchanged and does not
+    write a record.
+    """
+    s = 1.0 if signed_size > 0.0 else -1.0
+    adj_price = price * (1.0 + s * slippage[col])
+    notional = abs(signed_size) * adj_price * mult[col]
+    req_margin = notional * margin_rate[col]
+    req_fee = notional * fees[col] + abs(signed_size) * fixed_fees[col]
+
+    if cash < req_margin + req_fee:
+        return cash, order_idx
+
+    new_cash = cash - req_margin - req_fee
+    new_margin_locked = margin_locked[col] + req_margin
+    new_position = position[col] + signed_size
+    if position[col] == 0.0:
+        new_avg_price = adj_price
+    else:  # pragma: no cover (reversal closes first)
+        new_avg_price = avg_price[col]
+
+    side = OPEN_LONG if signed_size > 0.0 else OPEN_SHORT
+    rec = orders[order_idx]
+    rec["id"] = order_idx
+    rec["col"] = col
+    rec["idx"] = bar_idx
+    rec["size"] = signed_size
+    rec["price"] = adj_price
+    rec["fees"] = req_fee
+    rec["margin"] = req_margin
+    rec["side"] = side
+    rec["pnl"] = 0.0
+
+    cash = new_cash
+    position[col] = new_position
+    avg_price[col] = new_avg_price
+    margin_locked[col] = new_margin_locked
+    order_idx += 1
+    return cash, order_idx
 
 
 @njit(cache=True)
@@ -65,8 +139,60 @@ def simulate_futures_nb(
             if not liquidated[col] and position[col] != 0.0:
                 cash += position[col] * (close[t, col] - prev_close[col]) * mult[col]
 
-        # ---------- STEP 2: signals (placeholder, filled in by later tasks) ----------
-        # The two-pass signal handling will be added in Tasks 9+.
+        # ---------- STEP 2: signals (two-pass evaluation) ----------
+        for col in range(N):
+            if liquidated[col]:
+                continue
+            size_at_t = size[t, col]
+
+            # --- PASS 1: handle existing position (exit / reversal) ---
+            # Filled in fully by Tasks 12-14.  For now, only HOLD is implemented
+            # so that we can drive the open-long path (Task 9) and the
+            # mark-to-market / dynamic margin paths first.
+            pass1_did_something = False
+            if position[col] > 0.0:
+                # Long held: only short_entry can do something here.
+                # Reversal logic lands in Task 14; without it we simply hold.
+                pass1_did_something = False
+            elif position[col] < 0.0:
+                # Short held: only long_entry matters.  Task 14.
+                pass1_did_something = False
+            # If Pass 1 did something, skip Pass 2 (reversal case).
+            if pass1_did_something:
+                continue
+
+            # --- PASS 2: handle entry from flat ---
+            if position[col] != 0.0:
+                continue
+            le = long_entries[t, col]
+            se = short_entries[t, col]
+            if le and se:
+                fc = flat_conflict_code[col]
+                if fc == _FLAT_LONG:
+                    cash, order_idx = _try_open(
+                        col, size_at_t, close[t, col], t, cash, position,
+                        avg_price, margin_locked, mult, margin_rate, fees,
+                        fixed_fees, slippage, orders, order_idx,
+                    )
+                elif fc == _FLAT_SHORT:
+                    cash, order_idx = _try_open(
+                        col, -size_at_t, close[t, col], t, cash, position,
+                        avg_price, margin_locked, mult, margin_rate, fees,
+                        fixed_fees, slippage, orders, order_idx,
+                    )
+                # _FLAT_SKIP => no-op
+            elif le:
+                cash, order_idx = _try_open(
+                    col, size_at_t, close[t, col], t, cash, position,
+                    avg_price, margin_locked, mult, margin_rate, fees,
+                    fixed_fees, slippage, orders, order_idx,
+                )
+            elif se:
+                cash, order_idx = _try_open(
+                    col, -size_at_t, close[t, col], t, cash, position,
+                    avg_price, margin_locked, mult, margin_rate, fees,
+                    fixed_fees, slippage, orders, order_idx,
+                )
 
         # ---------- STEP 3: dynamic margin recompute ----------
         for col in range(N):
