@@ -448,3 +448,95 @@ def test_flat_conflict_short_when_configured() -> None:
     assert len(orders) == 1
     assert orders[0]["side"] == 2     # OPEN_SHORT
     assert pos[0, 0] == -1.0
+
+
+def test_reject_when_cash_insufficient() -> None:
+    """Cash < required margin -> order silently dropped, no record written."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=50.0,  # not enough for 100 margin
+    )
+    assert len(orders) == 0
+    assert pos[0, 0] == 0.0
+    assert mrg[0, 0] == 0.0
+    assert cash[0] == 50.0
+
+
+def test_nan_close_skips_bar() -> None:
+    """If close[t, col] is NaN, the column is frozen (no orders, no mark-to-market)."""
+    T, N = 2, 1
+    close = np.array([[100.0], [np.nan]])
+    long_entries = np.zeros((T, N), dtype=bool)
+    long_entries[0, 0] = True
+    long_entries[1, 0] = True
+    orders, cash, pos, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N), slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    # t=0: open long, cash=9900, mrg=100
+    assert len(orders) == 1
+    assert cash[0] == 9_900.0
+    assert pos[0, 0] == 1.0
+    assert mrg[0, 0] == 100.0
+    # t=1: NaN, no new order, position/margin held, cash unchanged.
+    assert len(orders) == 1
+    assert cash[1] == 9_900.0
+    assert pos[1, 0] == 1.0
+    assert mrg[1, 0] == 100.0
+
+
+def test_slippage_moves_open_price_up() -> None:
+    """Open long with slippage=1% -> effective entry at price * 1.01."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    orders, cash, _, mrg = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.zeros(N),
+        slippage=np.array([0.01]),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    assert orders[0]["price"] == pytest.approx(101.0)
+    # Margin is computed on the *close* price, not the fill price (per spec §5.2 STEP 3).
+    # Margin = 1 * 100 * 10 * 0.10 = 100.
+    assert mrg[0, 0] == pytest.approx(100.0)
+
+
+def test_fixed_fees_deducted_from_cash() -> None:
+    """fixed_fees=3 per lot, 1 lot, on entry -> cash - 3 after the trade."""
+    T, N = 1, 1
+    close = _const_close(T, N, 100.0)
+    long_entries = np.ones((T, N), dtype=bool)
+    orders, cash, _, _ = simulate_futures_nb(
+        close=close, long_entries=long_entries, long_exits=_all_false(T, N),
+        short_entries=_all_false(T, N), short_exits=_all_false(T, N),
+        size=_const_close(T, N, 1.0),
+        mult=np.array([10.0]),
+        margin_rate=np.array([0.10]),
+        fees=np.zeros(N), fixed_fees=np.array([3.0]),
+        slippage=np.zeros(N),
+        flat_conflict_code=np.array([2], dtype=np.int8),
+        init_cash=10_000.0,
+    )
+    assert cash[0] == 9_897.0
+    assert orders[0]["fees"] == 3.0

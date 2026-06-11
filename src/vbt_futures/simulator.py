@@ -194,6 +194,13 @@ def simulate_futures_nb(
     out_margin = np.empty((T, N), dtype=np.float64)
 
     for t in range(T):
+        # ---------- STEP 0: NaN guard ----------
+        # If a column's close at this bar is NaN, skip all per-column work
+        # for this bar (keep prior state, no orders, no margin diff).
+        for col in range(N):
+            if np.isnan(close[t, col]):
+                liquidated[col] = True  # mark as "frozen" - no further activity
+
         # ---------- STEP 1: mark-to-market ----------
         for col in range(N):
             if not liquidated[col] and position[col] != 0.0:
@@ -291,6 +298,8 @@ def simulate_futures_nb(
 
         # ---------- STEP 3: dynamic margin recompute ----------
         for col in range(N):
+            if liquidated[col]:
+                continue
             if position[col] != 0.0:
                 new_margin = abs(position[col]) * close[t, col] * mult[col] * margin_rate[col]
                 cash -= new_margin - margin_locked[col]
@@ -301,8 +310,21 @@ def simulate_futures_nb(
                     cash += margin_locked[col]
                     margin_locked[col] = 0.0
 
-        # ---------- STEP 4: liquidation (added in Task 18) ----------
-        # No-op until then.
+        # ---------- STEP 4: liquidation ----------
+        # If total equity is <= 0, close all open positions and mark them
+        # as liquidated so no further activity is allowed.
+        total_equity = cash
+        for col in range(N):
+            total_equity += margin_locked[col]
+        if total_equity <= 0.0:
+            for col in range(N):
+                if position[col] != 0.0 and not liquidated[col]:
+                    cash, order_idx = _do_close(
+                        col, close[t, col], t, cash, position, avg_price,
+                        margin_locked, mult, fees, fixed_fees, slippage,
+                        orders, order_idx, side_override=LIQUIDATED,
+                    )
+                    liquidated[col] = True
 
         # ---------- STEP 5: snapshot ----------
         out_cash[t] = cash
